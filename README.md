@@ -134,7 +134,7 @@ On the Pi, `MAIL2_DEBUG=1 /Applications/Mail2.app/Mail2` logs the IMAP and SMTP 
 | `dict/` | the en_US Hunspell dictionary and its licence |
 | `Mail2Rules.m`, `Mail2RulesWindow.m` | rules for new mail, and their window |
 | `Mail2OAuth.m` | OAuth sign-in (browser with PKCE, device code), token refresh, the small HTTPS client |
-| `icons/`, `tools/make_icons.sh`, `tools/make_icon.m` | Lucide glyphs, the envelope-and-stamp app icon, and their generators |
+| `icons/`, `tools/make_icons.sh`, `tools/make_icon.m` | Lucide glyphs, the app icon (an open envelope and a second one, on teal), and their generators |
 | `tests/` | the host test of the mail core |
 | `tools/qemu_shots.sh` | the QEMU end-to-end run |
 | `docs/plan.md` | the plan |
