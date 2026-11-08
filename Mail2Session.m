@@ -704,6 +704,87 @@ Mail2ClearDockBadge(void)
 	[sn autorelease];
 }
 
+- (Mail2Mailbox *) mailboxNamed: (NSString *)display
+{
+	NSEnumerator *e = [[[Mail2Store sharedStore] mailboxesForAccount: [account identifier]] objectEnumerator];
+	Mail2Mailbox *m;
+	while ((m = [e nextObject]) != nil)
+		if ([m depth] == 0 && [[m displayName] isEqualToString: display])
+			return m;
+	return nil;
+}
+
+- (void) moveMessages: (NSArray *)msgs toNamedMailbox: (NSString *)name
+{
+	Mail2Mailbox *dest = [self mailboxNamed: name];
+	if (dest != nil) {
+		[self moveMessages: msgs toMailbox: dest];
+		return;
+	}
+	/* made first, then the move */
+	NSArray *keep = [msgs retain];
+	NSString *n = [name copy];
+	[self run: [NSString stringWithFormat: @"Making %@…", name] work: ^BOOL (NSString **err) {
+		char d;
+		NSString *full = [[self q_newMailboxPrefix: &d] stringByAppendingString: Mail2EncodeMailboxName(n)];
+		BOOL ok = [imap createMailbox: full error: err] && [self q_refreshMailboxes: err];
+		Mail2RunOnMain(^{
+			Mail2Mailbox *made = [self mailboxNamed: n];
+			if (made != nil)
+				[self moveMessages: keep toMailbox: made];
+			[keep release];
+			[n release];
+		});
+		return ok;
+	}];
+}
+
+- (void) moveBackFromNamed: (NSString *)fromDisplayName messageIDs: (NSArray *)ids toNamed: (NSString *)imapName markUnread: (BOOL)unread
+{
+	Mail2Mailbox *from = [self mailboxNamed: fromDisplayName];
+	if (from == nil || [ids count] == 0)
+		return;
+	NSArray *mids = [ids copy];
+	NSString *fn = [[from name] copy], *tn = [imapName copy];
+	long long fid = [from mbid];
+	[self run: @"Bringing back…" work: ^BOOL (NSString **err) {
+		if (![imap select: fn uidValidity: NULL uidNext: NULL exists: NULL error: err])
+			return NO;
+		NSMutableArray *uids = [NSMutableArray array];
+		NSEnumerator *e = [mids objectEnumerator];
+		NSString *mid;
+		while ((mid = [e nextObject]) != nil) {
+			NSArray *u = [imap uidsWithMessageID: mid error: err];
+			if (u == nil)
+				return NO;
+			[uids addObjectsFromArray: u];
+		}
+		if ([uids count] && ![imap moveUids: uids to: tn error: err])
+			return NO;
+		[[Mail2Store sharedStore] removeUids: uids inMailbox: fid];
+		[self postMessagesChanged: fid];
+		if (![imap select: tn uidValidity: NULL uidNext: NULL exists: NULL error: err])
+			return NO;
+		if (unread) {
+			NSMutableArray *back = [NSMutableArray array];
+			e = [mids objectEnumerator];
+			while ((mid = [e nextObject]) != nil)
+				[back addObjectsFromArray: [imap uidsWithMessageID: mid error: err]];
+			if ([back count])
+				[imap setFlags: Mail2FlagSeen add: NO uids: back error: err];
+		}
+		NSEnumerator *me = [[[Mail2Store sharedStore] mailboxesForAccount: [account identifier]] objectEnumerator];
+		Mail2Mailbox *m;
+		while ((m = [me nextObject]) != nil)
+			if ([[m name] isEqualToString: tn])
+				return [self q_sync: m error: err];
+		return YES;
+	}];
+	[mids autorelease];
+	[fn autorelease];
+	[tn autorelease];
+}
+
 /* ---- mailboxes ---- */
 
 /* the prefix new top-level mailboxes need: "INBOX." on servers whose folders all live under the Inbox */

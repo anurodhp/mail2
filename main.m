@@ -14,6 +14,7 @@
 #import "Mail2AccountPanel.h"
 #import "Mail2RulesWindow.h"
 #import "Mail2Outbox.h"
+#import "Mail2Snooze.h"
 #import "Mail2Compose.h"
 #import "Mail2Session.h"
 #import "Mail2Store.h"
@@ -280,6 +281,8 @@ static NSString *volatile heartbeatMode;
 - (void) sendNow: (id)s { [viewer sendNow: s]; }
 - (void) saveSearch: (id)s { [viewer saveSearch: s]; }
 - (void) toggleMute: (id)s { [viewer toggleMute: s]; }
+- (void) snooze: (id)s { [viewer snooze: s]; }
+- (void) stopReminding: (id)s { [viewer stopReminding: s]; }
 - (void) toggleBlock: (id)s { [viewer toggleBlock: s]; }
 
 - (void) showRules: (id)sender
@@ -298,7 +301,7 @@ static NSString *volatile heartbeatMode;
 {
 	SEL a = [i action];
 
-	if ((a == @selector(toggleMute:) || a == @selector(toggleBlock:)) && viewer != nil)
+	if ((a == @selector(toggleMute:) || a == @selector(toggleBlock:) || a == @selector(snooze:)) && viewer != nil)
 		return [viewer validateMenuItem: i];
 	if (a == @selector(toggleConversations:)) {
 		[i setState: [Mail2Window organizesByConversation] ? NSOnState : NSOffState];
@@ -331,6 +334,7 @@ static NSString *volatile heartbeatMode;
 	add_item(m, @"Attach File…", @selector(attachFile:), nil, nil);		/* to the compose window in front */
 	add_item(m, @"Save as Draft", @selector(saveDraft:), @"s", nil);
 	add_item(m, @"Send Later…", @selector(sendLater:), nil, nil);
+	add_item(m, @"Remind Me If No Reply…", @selector(remindIfNoReply:), nil, nil);
 	add_item(m, @"Close Window", @selector(performClose:), @"w", nil);
 	[main setSubmenu: m forItem: add_item(main, @"File", NULL, nil, nil)]; [m release];
 
@@ -389,6 +393,8 @@ static NSString *volatile heartbeatMode;
 	add_item(m, @"Move To…", @selector(moveTo:), @"M", self);
 	add_item(m, @"Mark as Junk", @selector(markJunk:), @"J", self);
 	add_item(m, @"Apply Rules", @selector(applyRules:), nil, self);
+	add_item(m, @"Snooze…", @selector(snooze:), nil, self);
+	add_item(m, @"Stop Reminding", @selector(stopReminding:), nil, self);
 	add_item(m, @"Mute Conversation", @selector(toggleMute:), nil, self);
 	add_item(m, @"Block Sender", @selector(toggleBlock:), nil, self);
 	add_item(m, @"Show Raw Source", @selector(showSource:), nil, self);
@@ -433,6 +439,15 @@ static NSString *volatile heartbeatMode;
 		return nil;
 	}];
 	[viewer outboxChanged: nil];
+	[[Mail2Later shared] setSessionLookup: ^id (NSString *ident) {
+		NSEnumerator *e = [sessions objectEnumerator];
+		Mail2Session *s;
+		while ((s = [e nextObject]) != nil)
+			if ([[[s account] identifier] isEqualToString: ident])
+				return s;
+		return nil;
+	}];
+	[[Mail2Later shared] performSelector: @selector(check) withObject: nil afterDelay: 20];	/* after the first sync */
 	if ([accounts count] == 0)
 		[self addAccount: nil];
 	NSString *to = mailto_argument();

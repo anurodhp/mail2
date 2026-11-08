@@ -3,6 +3,7 @@
 #import "Mail2Compose.h"
 #import "Mail2Util.h"
 #import "Mail2Outbox.h"
+#import "Mail2Snooze.h"
 #include <dispatch/dispatch.h>
 
 #define BAR_H 44.0
@@ -215,6 +216,7 @@ scroller_for(NSTableView *t, NSRect r)
 	[nc addObserver: self selector: @selector(messagesChanged:) name: Mail2MessagesChanged object: nil];
 	[nc addObserver: self selector: @selector(statusChanged:) name: Mail2StatusChanged object: nil];
 	[nc addObserver: self selector: @selector(outboxChanged:) name: Mail2OutboxChanged object: nil];
+	[nc addObserver: self selector: @selector(laterChanged:) name: Mail2LaterChanged object: nil];
 
 	[self reloadSidebar];
 	[self updateButtons];
@@ -348,6 +350,10 @@ scroller_for(NSTableView *t, NSRect r)
 	/* Unread, while there is something unread (or it is shown) */
 	if ([sessions count] > 0 && ([[Mail2Store sharedStore] unreadCount] > 0 || [current mbid] == Mail2UnreadID))
 		[sidebarItems addObject: [Mail2Mailbox unreadSmart]];
+	/* Follow Up, while a reminder is due */
+	NSUInteger due = [[[Mail2Later shared] dueFollowUps] count];
+	if (due > 0 || [current mbid] == Mail2FollowUpID)
+		[sidebarItems addObject: [Mail2Mailbox followUp: (int)due]];
 	/* the Outbox, while something waits to go */
 	NSUInteger waiting = [[[Mail2Outbox shared] items] count];
 	if (waiting > 0 || [current mbid] == Mail2OutboxID)
@@ -438,6 +444,7 @@ scroller_for(NSTableView *t, NSRect r)
 - (BOOL) showsConversations
 {
 	return searchText == nil && [Mail2Window organizesByConversation] && [current mbid] != Mail2UnreadID &&
+	    [current mbid] != Mail2FollowUpID &&
 	    [current mbid] > Mail2SavedSearchBase;
 }
 
@@ -451,6 +458,8 @@ scroller_for(NSTableView *t, NSRect r)
 		return [NSArray array];
 	if ([current mbid] == Mail2OutboxID)
 		return [self outboxRows];
+	if ([current mbid] == Mail2FollowUpID)
+		return [store messagesWithMessageIDs: [[Mail2Later shared] dueFollowUps]];
 	if ([current mbid] <= Mail2SavedSearchBase) {	/* a saved search, narrowed by the search field */
 		NSString *q = searchText ? [NSString stringWithFormat: @"%@ %@", [current name], searchText] : [current name];
 		return [store searchMailbox: Mail2EverywhereID text: q alsoUids: nil limit: LIST_LIMIT];
@@ -925,6 +934,10 @@ scroller_for(NSTableView *t, NSRect r)
 		return [self selectedMessage] != nil;
 	if (a == @selector(toggleMute:))
 		return [[self selectedMessage] thread] != nil;
+	if (a == @selector(snooze:))
+		return [[self selectedMessages] count] > 0 && ([self inSnoozed] || ![current isVirtual] || [current mbid] == Mail2AllInboxesID);
+	if (a == @selector(stopReminding:))
+		return [current mbid] == Mail2FollowUpID && [[self selectedMessages] count] > 0;
 	if (a == @selector(toggleBlock:))
 		return [[self selectedMessage] fromAddr] != nil;
 	if (a == @selector(moveTo:) || a == @selector(markJunk:) || a == @selector(applyRules:))
@@ -965,6 +978,8 @@ scroller_for(NSTableView *t, NSRect r)
 - (BOOL) validateMenuItem: (NSMenuItem *)item
 {
 	Mail2MessageInfo *m = [self selectedMessage];
+	if ([item action] == @selector(snooze:))
+		[item setTitle: [self inSnoozed] ? @"Unsnooze" : @"Snooze…"];
 	if ([item action] == @selector(toggleMute:))
 		[item setTitle: m && [[Mail2Store sharedStore] isThreadMuted: [m thread]] ? @"Unmute Conversation" : @"Mute Conversation"];
 	if ([item action] == @selector(toggleBlock:))
@@ -1369,6 +1384,56 @@ scroller_for(NSTableView *t, NSRect r)
 	[sv setDocumentView: tv];
 	[[w contentView] addSubview: sv];
 	[w makeKeyAndOrderFront: nil];
+}
+
+/* ---- snooze, follow up ---- */
+
+- (BOOL) inSnoozed
+{
+	return current != nil && ![current isVirtual] && [current depth] == 0 && [[current displayName] isEqualToString: @"Snoozed"];
+}
+
+- (void) snooze: (id)sender
+{
+	if ([self inSnoozed]) {	/* Unsnooze: back now */
+		NSEnumerator *e = [[self actionMessages] objectEnumerator];
+		Mail2MessageInfo *m;
+		while ((m = [e nextObject]) != nil)
+			if ([m messageId])
+				[[Mail2Later shared] wake: [m messageId]];
+		return;
+	}
+	NSArray *msgs = [self actionMessages];
+	if ([msgs count] == 0)
+		return;
+	NSDate *when = Mail2ChooseSnoozeTime();
+	if (when == nil)
+		return;
+	[self removeSelectedThen: ^(NSArray *sel) {
+		[self eachSession: msgs do: ^(Mail2Session *s, NSArray *mine) { [[Mail2Later shared] snooze: mine of: s until: when]; }];
+	}];
+}
+
+- (void) stopReminding: (id)sender
+{
+	NSEnumerator *e = [[self selectedMessages] objectEnumerator];
+	Mail2MessageInfo *m;
+	while ((m = [e nextObject]) != nil)
+		if ([m messageId])
+			[[Mail2Later shared] stopReminding: [m messageId]];
+}
+
+- (void) laterChanged: (NSNotification *)n
+{
+	BOOL listed = NO;
+	NSUInteger j;
+	for (j = 0; j < [sidebarItems count]; j++)
+		if ([[sidebarItems objectAtIndex: j] isKindOfClass: [Mail2Mailbox class]] && [[sidebarItems objectAtIndex: j] mbid] == Mail2FollowUpID)
+			listed = YES;
+	if (listed != ([[[Mail2Later shared] dueFollowUps] count] > 0 || [current mbid] == Mail2FollowUpID))
+		[self reloadSidebar];
+	if ([current mbid] == Mail2FollowUpID)
+		[self reloadMessages];
 }
 
 /* ---- mute, block ---- */

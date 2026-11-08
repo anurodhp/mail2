@@ -1084,6 +1084,8 @@ own_address_filter(NSArray *addrs, NSString *mine, NSMutableSet *seen)
 	    [bccField stringValue], @"Bcc", [self fromLine], @"From", nil];
 	if (undoable)
 		[d setObject: [NSNumber numberWithBool: YES] forKey: @"Undoable"];
+	if (followUpDays > 0)
+		[d setObject: [NSNumber numberWithInt: followUpDays] forKey: @"FollowUpDays"];
 	if (draftId)
 		[d setObject: draftId forKey: @"Draft"];
 	if (original)
@@ -1105,6 +1107,15 @@ own_address_filter(NSArray *addrs, NSString *mine, NSMutableSet *seen)
 	NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
 	NSTimeInterval delay = [ud objectForKey: @"Mail2UndoSendDelay"] ? [ud doubleForKey: @"Mail2UndoSendDelay"] : 5;
 	[self queueAt: [NSDate dateWithTimeIntervalSinceNow: MAX(0, delay)] undoable: delay > 0];
+}
+
+- (void) remindIfNoReply: (id)sender
+{
+	int d = Mail2ChooseFollowUpDays();
+	if (d <= 0)
+		return;
+	followUpDays = d;
+	[window setTitle: [NSString stringWithFormat: @"%@ (reminder after %d day%@)", [self plainTitle], d, d == 1 ? @"" : @"s"]];
 }
 
 - (void) sendLater: (id)sender
@@ -1149,6 +1160,7 @@ own_address_filter(NSArray *addrs, NSString *mine, NSMutableSet *seen)
 	ASSIGN(c->draftId, [d objectForKey: @"Draft"]);
 	if ([d objectForKey: @"ReplyTo"])
 		ASSIGN(c->original, [[Mail2Store sharedStore] messageWithRowID: [[d objectForKey: @"ReplyTo"] longLongValue]]);
+	c->followUpDays = [[d objectForKey: @"FollowUpDays"] intValue];
 	[c layoutAttachments];
 	[c setDirty: YES];
 	[c showFocusing: c->bodyView];

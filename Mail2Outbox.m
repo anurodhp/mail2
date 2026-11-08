@@ -3,6 +3,7 @@
 #import "Mail2Session.h"
 #import "Mail2Store.h"
 #import "Mail2Util.h"
+#import "Mail2Snooze.h"
 
 NSString *const Mail2OutboxChanged = @"Mail2OutboxChanged";
 
@@ -184,6 +185,7 @@ backoff(int attempts)
 		Mail2MessageInfo *orig = [d objectForKey: @"ReplyTo"] ?
 		    [[Mail2Store sharedStore] messageWithRowID: [[d objectForKey: @"ReplyTo"] longLongValue]] : nil;
 		NSString *draft = [[d objectForKey: @"Draft"] copy];
+		NSDictionary *meta = [d copy];
 		[s sendMessage: raw recipients: rcpts replyingTo: orig completion: ^(NSString *err) {
 			[sending removeObject: ident];
 			NSMutableDictionary *cur = [self find: ident];
@@ -191,6 +193,11 @@ backoff(int attempts)
 				[self drop: ident];
 				if (draft)
 					[s deleteDraft: draft];
+				/* "Remind me if no reply" */
+				if ([[meta objectForKey: @"FollowUpDays"] intValue] > 0)
+					[[Mail2Later shared] remindAbout: [meta objectForKey: @"MessageId"] account: [meta objectForKey: @"Account"]
+					    subject: [meta objectForKey: @"Subject"] to: [meta objectForKey: @"To"]
+					    after: [[meta objectForKey: @"FollowUpDays"] intValue] * 86400.0];
 			} else if (cur != nil) {
 				int attempts = [[cur objectForKey: @"Attempts"] intValue] + 1;
 				[cur setObject: [NSNumber numberWithInt: attempts] forKey: @"Attempts"];
@@ -200,6 +207,7 @@ backoff(int attempts)
 				NSLog(@"mail2: outbox: not sent, again in %.0f s: %@", backoff(attempts), err);
 			}
 			[draft release];
+			[meta release];
 			[self changed];
 		}];
 		[self changed];

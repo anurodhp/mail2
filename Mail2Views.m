@@ -188,6 +188,7 @@ mailbox_icon(Mail2Mailbox *m)
 	if ([s isEqualToString: @"outbox"]) return @"sb-sent";
 	if ([s isEqualToString: @"unreadsmart"]) return @"sb-unread";
 	if ([s isEqualToString: @"savedsearch"]) return @"sb-search";
+	if ([s isEqualToString: @"followup"]) return @"sb-flag";
 	if ([s isEqualToString: @"drafts"]) return @"sb-drafts";
 	if ([s isEqualToString: @"sent"]) return @"sb-sent";
 	if ([s isEqualToString: @"archive"] || [s isEqualToString: @"all"]) return @"sb-archive";
@@ -1249,4 +1250,51 @@ Mail2ChooseSendTime(void)
 		return nil;
 	}
 	return d;
+}
+
+NSDate *
+Mail2ChooseSnoozeTime(void)
+{
+	NSCalendarDate *now = [NSCalendarDate calendarDate];
+	NSCalendarDate *today8 = [NSCalendarDate dateWithYear: [now yearOfCommonEra] month: [now monthOfYear] day: [now dayOfMonth]
+	    hour: 8 minute: 0 second: 0 timeZone: [now timeZone]];
+	NSCalendarDate *evening = [today8 dateByAddingYears: 0 months: 0 days: 0 hours: 10 minutes: 0 seconds: 0];
+	if ([evening timeIntervalSinceNow] < 600)
+		evening = [evening dateByAddingYears: 0 months: 0 days: 1 hours: 0 minutes: 0 seconds: 0];
+	NSCalendarDate *tomorrow = [today8 dateByAddingYears: 0 months: 0 days: 1 hours: 0 minutes: 0 seconds: 0];
+	int toMonday = (8 - [now dayOfWeek]) % 7;
+	NSCalendarDate *monday = [today8 dateByAddingYears: 0 months: 0 days: toMonday ? toMonday : 7 hours: 0 minutes: 0 seconds: 0];
+	NSArray *when = [NSArray arrayWithObjects: [NSDate dateWithTimeIntervalSinceNow: 3 * 3600], evening, tomorrow, monday, nil];
+	NSArray *titles = [NSArray arrayWithObjects: @"Later today (in 3 hours)", [NSString stringWithFormat: @"This evening (%@)", Mail2LongDate(evening)],
+	    [NSString stringWithFormat: @"Tomorrow morning (%@)", Mail2LongDate(tomorrow)],
+	    [NSString stringWithFormat: @"Next week (%@)", Mail2LongDate(monday)], @"At a time I type…", nil];
+	NSPopUpButton *pop = [[[NSPopUpButton alloc] initWithFrame: NSMakeRect(0, 0, 368, 26) pullsDown: NO] autorelease];
+	[pop addItemsWithTitles: titles];
+	if (run_question(@"Snooze", @"Bring it back:", pop, @"Snooze") != NSOKButton)
+		return nil;
+	NSInteger i = [pop indexOfSelectedItem];
+	if (i >= 0 && i < (NSInteger)[when count])
+		return [when objectAtIndex: i];
+	NSString *typed = Mail2AskString(@"Snooze", @"Date and time (YYYY-MM-DD HH:MM):",
+	    [tomorrow descriptionWithCalendarFormat: @"%Y-%m-%d %H:%M"], @"Snooze");
+	NSCalendarDate *d = typed ? [NSCalendarDate dateWithString: typed calendarFormat: @"%Y-%m-%d %H:%M"] : nil;
+	if (typed != nil && (d == nil || [d timeIntervalSinceNow] < 0)) {
+		NSRunAlertPanel(@"Snooze", @"“%@” is not a time to come (YYYY-MM-DD HH:MM).", @"OK", nil, nil, typed);
+		return nil;
+	}
+	return d;
+}
+
+int
+Mail2ChooseFollowUpDays(void)
+{
+	static const int days[] = { 1, 2, 3, 5, 7 };
+	NSPopUpButton *pop = [[[NSPopUpButton alloc] initWithFrame: NSMakeRect(0, 0, 368, 26) pullsDown: NO] autorelease];
+	unsigned i;
+	for (i = 0; i < 5; i++)
+		[pop addItemWithTitle: days[i] == 1 ? @"After a day" : [NSString stringWithFormat: @"After %d days", days[i]]];
+	[pop selectItemAtIndex: 2];
+	if (run_question(@"Remind Me If No Reply", @"If nobody answers, list it in Follow Up:", pop, @"Remind Me") != NSOKButton)
+		return 0;
+	return days[[pop indexOfSelectedItem]];
 }

@@ -98,6 +98,10 @@ BOOL Mail2WebViewInstalled(void);	/* the library is there (and has not failed): 
 NSString *Mail2AskString(NSString *title, NSString *message, NSString *initial, NSString *okTitle);
 /* Send Later's question: in an hour, this evening, tomorrow morning, Monday morning, or a date typed; nil if cancelled */
 NSDate *Mail2ChooseSendTime(void);
+/* Snooze's question: later today, this evening, tomorrow morning, next week, or a date typed; nil if cancelled */
+NSDate *Mail2ChooseSnoozeTime(void);
+/* how many days without a reply before a reminder (1, 2, 3, 5, 7); 0 if cancelled */
+int Mail2ChooseFollowUpDays(void);
 Mail2Mailbox *Mail2ChooseMailbox(NSString *title, NSString *message, NSArray *mailboxes, NSString *okTitle);
 
 void Mail2SaveAttachment(Mail2Attachment *a);	/* the save panel, ~/Downloads first */

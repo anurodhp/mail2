@@ -44,6 +44,18 @@
 	return m;
 }
 
++ (Mail2Mailbox *) followUp: (int)count
+{
+	Mail2Mailbox *m = [[[Mail2Mailbox alloc] init] autorelease];
+	m->mbid = Mail2FollowUpID;
+	m->name = [@"" retain];
+	m->displayName = [@"Follow Up" retain];
+	m->special = [@"followup" retain];
+	m->selectable = YES;
+	m->unread = count;
+	return m;
+}
+
 + (Mail2Mailbox *) unreadSmart
 {
 	Mail2Mailbox *m = [[[Mail2Mailbox alloc] init] autorelease];
@@ -922,6 +934,40 @@ like_pattern(NSString *t)
 		[r addObject: [self messageFromRow: st]];
 	sqlite3_finalize(st);
 	[lock unlock];
+	return r;
+}
+
+- (BOOL) hasReplyTo: (NSString *)messageId
+{
+	if (messageId == nil)
+		return NO;
+	BOOL r = NO;
+	[lock lock];
+	sqlite3_stmt *st = [self prepare: "SELECT 1 FROM messages WHERE in_reply_to = ?1 OR instr(refs, ?1) > 0 LIMIT 1"];
+	bind_string(st, 1, messageId);
+	r = st && sqlite3_step(st) == SQLITE_ROW;
+	sqlite3_finalize(st);
+	[lock unlock];
+	return r;
+}
+
+- (NSArray *) messagesWithMessageIDs: (NSArray *)ids
+{
+	NSMutableArray *r = [NSMutableArray array];
+	NSEnumerator *e = [ids objectEnumerator];
+	NSString *mid;
+	[lock lock];
+	sqlite3_stmt *st = [self prepare: "SELECT " MESSAGE_COLUMNS " FROM messages WHERE message_id = ? AND (flags & 8) = 0"
+	    " ORDER BY (mailbox IN (SELECT id FROM mailboxes WHERE special = 'sent')) DESC LIMIT 1"];
+	while ((mid = [e nextObject]) != nil) {
+		sqlite3_reset(st);
+		bind_string(st, 1, mid);
+		if (sqlite3_step(st) == SQLITE_ROW)
+			[r addObject: [self messageFromRow: st]];
+	}
+	sqlite3_finalize(st);
+	[lock unlock];
+	[r sortUsingComparator: ^NSComparisonResult(id a, id b) { return [[b date] compare: [a date]]; }];
 	return r;
 }
 

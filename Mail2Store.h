@@ -26,6 +26,8 @@ enum {
 #define Mail2EverywhereID (-5LL)
 /* saved searches are shown as mailboxes with ids from here down: Mail2SavedSearchBase - index */
 #define Mail2SavedSearchBase (-100LL)
+/* sent messages whose follow-up reminder is due (Mail2Later): the Follow Up smart mailbox */
+#define Mail2FollowUpID (-6LL)
 
 @interface Mail2Mailbox : NSObject
 {
@@ -140,6 +142,12 @@ enum {
 - (int) unreadCount;	/* what the Unread smart mailbox holds */	/* every account's Inbox: the dock badge */
 /* the newest messages without a file, for prefetching */
 - (NSArray *) messagesToPrefetchInMailbox: (long long)mbid limit: (int)limit maxSize: (unsigned long long)maxSize;
+
+/* whether anything in the index answers this Message-ID (In-Reply-To or References) */
+- (BOOL) hasReplyTo: (NSString *)messageId;
+/* one row per Message-ID (a Sent copy first), newest first */
+- (NSArray *) messagesWithMessageIDs: (NSArray *)ids;
++ (Mail2Mailbox *) followUp: (int)count;
 
 /* ---- muted conversations, blocked senders ---- */
 - (void) setThread: (NSString *)thread muted: (BOOL)on;

@@ -36,6 +36,7 @@
 	NSMutableDictionary *lastLengths;	/* per address field: its length at the last change */
 	BOOL sending, saving, dirty, closeAfterSave, sent;
 	BOOL rich;			/* the body is rich text (sent as HTML when it has formatting) */
+	int followUpDays;		/* "Remind me if no reply" after these days; 0 for none */
 }
 + (Mail2Compose *) newMessageWithSessions: (NSArray *)sessions to: (NSString *)to;
 /* from a mailto: URL, with its cc, bcc, subject and body */
@@ -50,6 +51,7 @@
 - (void) attachFile: (id)sender;
 - (void) attachPaths: (NSArray *)paths;
 - (void) sendLater: (id)sender;
+- (void) remindIfNoReply: (id)sender;
 /* the Outbox's item (Mail2Outbox -takeBack:) in a compose window again */
 + (Mail2Compose *) reopenOutgoing: (NSDictionary *)item sessions: (NSArray *)sessions;
 /* Format */

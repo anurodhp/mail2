@@ -13,6 +13,7 @@
 #import "Mail2RichText.h"
 #import "Mail2Outbox.h"
 #import "Mail2Spell.h"
+#import "Mail2Snooze.h"
 #include <mbedtls/sha256.h>
 #include "Mail2TLS.h"
 #include <libetpan/mailstream.h>
@@ -964,6 +965,54 @@ main(void)
 		[store setAddress: @"blocked@localhost" blocked: NO];
 		[store setThread: [first thread] muted: NO];
 		[ms release];
+	}
+
+	printf("Snooze and follow-up\n");
+	{
+		Mail2Session *zs = [[Mail2Session alloc] initWithAccount: a1];
+		[zs refreshMailboxes];
+		wait_for(^BOOL { return ![zs isBusy]; }, 20);
+		Mail2Mailbox *ib = [zs mailboxWithSpecial: @"inbox"];
+		[zs syncMailbox: ib];
+		wait_for(^BOOL { return ![zs isBusy]; }, 20);
+		Mail2Later *later = [Mail2Later shared];
+		[later setSessionLookup: ^id (NSString *ident) { return zs; }];
+		Mail2MessageInfo *pick = [[store messagesInMailbox: [ib mbid] limit: 1] objectAtIndex: 0];
+		NSString *mid = [pick messageId];
+		[zs setFlag: Mail2FlagSeen on: YES forMessages: [NSArray arrayWithObject: pick]];
+		wait_for(^BOOL { return ![zs isBusy]; }, 20);
+		[later snooze: [NSArray arrayWithObject: pick] of: zs until: [NSDate dateWithTimeIntervalSinceNow: 3600]];
+		BOOL away = wait_for(^BOOL { return ![zs isBusy] && [[store messagesWithMessageIDs: [NSArray arrayWithObject: mid]] count] == 1 &&
+		    [[[store messagesWithMessageIDs: [NSArray arrayWithObject: mid]] objectAtIndex: 0] mbid] != [ib mbid]; }, 30);
+		Mail2Mailbox *snz = nil, *mb;
+		NSEnumerator *me = [[store mailboxesForAccount: @"test1@localhost"] objectEnumerator];
+		while ((mb = [me nextObject]) != nil)
+			if ([[mb displayName] isEqualToString: @"Snoozed"])
+				snz = mb;
+		[zs syncMailbox: snz];
+		wait_for(^BOOL { return ![zs isBusy]; }, 20);
+		CHECK(away && snz != nil && [[later snoozed] count] == 1, "snoozed: in a Snoozed mailbox made on the server");
+		[later wake: mid];
+		BOOL back = wait_for(^BOOL {
+			if ([zs isBusy]) return NO;
+			NSArray *r = [store messagesWithMessageIDs: [NSArray arrayWithObject: mid]];
+			return [r count] == 1 && [[r objectAtIndex: 0] mbid] == [ib mbid] && [[r objectAtIndex: 0] isUnread];
+		}, 30);
+		CHECK(back && [[later snoozed] count] == 0, "woken: back in the Inbox, unread");
+		[later remindAbout: @"<follow-1@localhost>" account: @"test1@localhost" subject: @"any news?" to: @"test2@localhost" after: -1];
+		NSData *f1 = Mail2BuildMessageEx(@"test1@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, nil, @"any news?", @"?",
+		    nil, nil, nil, @"<follow-1@localhost>");
+		Mail2SendMessage(a1, f1, [NSArray arrayWithObject: @"test1@localhost"], &err);
+		wait_for(^BOOL { [zs syncMailbox: ib]; wait_for(^BOOL { return ![zs isBusy]; }, 10);
+			return [[store messagesWithMessageIDs: [NSArray arrayWithObject: @"<follow-1@localhost>"]] count] == 1; }, 30);
+		CHECK([[later dueFollowUps] containsObject: @"<follow-1@localhost>"], "a reminder whose day has come, unanswered");
+		NSData *f2 = Mail2BuildMessageEx(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, nil, @"Re: any news?",
+		    @"yes", @"<follow-1@localhost>", [NSArray arrayWithObject: @"<follow-1@localhost>"], nil, nil);
+		Mail2SendMessage(a2, f2, [NSArray arrayWithObject: @"test1@localhost"], &err);
+		BOOL answered = wait_for(^BOOL { [zs syncMailbox: ib]; wait_for(^BOOL { return ![zs isBusy]; }, 10);
+			[later check]; return [[later dueFollowUps] count] == 0; }, 30);
+		CHECK(answered, "answered: the reminder goes");
+		[zs release];
 	}
 
 	printf("\n%d checks, %d failed\n", checks, failures);
