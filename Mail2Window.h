@@ -28,6 +28,7 @@
 	NSString *expanded;		/* the opened conversation */
 	NSMutableSet *childRows;	/* rowids of its messages shown under it */
 	BOOL loadingOlder;
+	NSUndoManager *undo;		/* moves (Archive, Delete, Junk, Move To, drops) */
 }
 - (id) initWithSessions: (NSArray *)s;
 - (void) setSessions: (NSArray *)s;
@@ -49,6 +50,7 @@
 - (void) moveTo: (id)sender;
 - (void) markJunk: (id)sender;
 - (void) applyRules: (id)sender;
+- (void) showSource: (id)sender;
 - (void) newMailbox: (id)sender;
 - (void) renameMailbox: (id)sender;
 - (void) deleteMailbox: (id)sender;

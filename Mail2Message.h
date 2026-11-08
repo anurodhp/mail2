@@ -22,13 +22,20 @@
 	NSArray *references;
 	NSString *htmlSource;
 	NSMutableDictionary *inlineParts;
+	NSString *listUnsubscribe;
+	BOOL oneClick;
 }
 /* nil if it cannot be parsed at all */
 + (Mail2ParsedMessage *) parseData: (NSData *)raw preferPlainText: (BOOL)plain;
 - (NSString *) body;		/* the text to show */
 - (BOOL) bodyWasHTML;
 - (NSString *) htmlSource;	/* the HTML shown, as HTML (when the HTML part was chosen), else nil */
-- (NSDictionary *) inlineParts;	/* Content-ID (no <>) -> Mail2Attachment: the images an HTML body shows by cid: */
+- (NSDictionary *) inlineParts;
+/* List-Unsubscribe (RFC 2369): its https: address and its mailto:, either may be nil; one-click (RFC 8058,
+ * List-Unsubscribe-Post) means a POST to the https: address unsubscribes, with nothing to open */
+- (NSString *) unsubscribeURL;
+- (NSString *) unsubscribeMailto;
+- (BOOL) unsubscribeOneClick;	/* Content-ID (no <>) -> Mail2Attachment: the images an HTML body shows by cid: */
 - (NSArray *) attachments;	/* Mail2Attachment */
 - (NSString *) snippet;		/* the opening of the body, quotes and blank lines left out, at most 200 characters */
 - (NSString *) messageId;	/* "<id@host>" */

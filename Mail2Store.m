@@ -19,6 +19,20 @@
 - (int) unread { return unread; }
 - (int) depth { return depth; }
 - (NSString *) description { return [NSString stringWithFormat: @"<Mailbox %lld %@>", mbid, name]; }
+- (BOOL) isVirtual { return mbid < 0; }
+
++ (Mail2Mailbox *) flagged
+{
+	Mail2Mailbox *m = [[[Mail2Mailbox alloc] init] autorelease];
+	m->mbid = Mail2FlaggedID;
+	m->name = [@"" retain];
+	m->displayName = [@"Flagged" retain];
+	m->special = [@"flaggedsmart" retain];
+	m->selectable = YES;
+	m->unread = [[Mail2Store sharedStore] flaggedCount];
+	return m;
+}
+
 + (Mail2Mailbox *) allInboxes
 {
 	Mail2Mailbox *m = [[[Mail2Mailbox alloc] init] autorelease];
@@ -385,7 +399,8 @@ special_rank(NSString *s)
 /* ---- messages ---- */
 
 /* a mailbox, or with Mail2AllInboxesID every account's Inbox (?1 is the mailbox id) */
-#define MBOX "(mailbox = ?1 OR (?1 = -1 AND mailbox IN (SELECT id FROM mailboxes WHERE special = 'inbox')))"
+#define MBOX "(mailbox = ?1 OR (?1 = -1 AND mailbox IN (SELECT id FROM mailboxes WHERE special = 'inbox'))" \
+	" OR (?1 = -2 AND (flags & 4) != 0 AND mailbox NOT IN (SELECT id FROM mailboxes WHERE special IN ('trash', 'junk'))))"
 
 #define MESSAGE_COLUMNS "id, mailbox, uid, flags, date, from_name, from_addr, to_list, cc_list, reply_to, subject," \
 	" message_id, in_reply_to, refs, size, attach, snippet, file, thread"
@@ -637,7 +652,7 @@ fts_query(NSString *text)
 	    "  OR to_list LIKE ?2 ESCAPE '\\' OR cc_list LIKE ?2 ESCAPE '\\' OR snippet LIKE ?2 ESCAPE '\\')"];
 	if ([q length])
 		[sql appendString: @" OR id IN (SELECT docid FROM bodies WHERE body MATCH ?3)"];
-	if ([uidList length] && mbid != Mail2AllInboxesID)	/* numbers only: from the server's search */
+	if ([uidList length] && mbid >= 0)	/* numbers only: from the server's search */
 		[sql appendFormat: @" OR uid IN (%@)", uidList];
 	[sql appendString: @") ORDER BY date DESC, uid DESC LIMIT ?4"];
 	NSString *like = [[[text stringByReplacingOccurrencesOfString: @"\\" withString: @"\\\\"]
@@ -744,7 +759,22 @@ fts_query(NSString *text)
 {
 	if (mbid == Mail2AllInboxesID)
 		return [self unreadInInboxes];
+	if (mbid == Mail2FlaggedID)
+		return [self flaggedCount];
 	return [self countQuery: "SELECT COUNT(*) FROM messages WHERE mailbox = ? AND (flags & 9) = 0" mailbox: mbid];
+}
+
+- (int) flaggedCount
+{
+	int n = 0;
+	[lock lock];
+	sqlite3_stmt *st = [self prepare: "SELECT COUNT(*) FROM messages WHERE (flags & 12) = 4 AND"
+	    " mailbox NOT IN (SELECT id FROM mailboxes WHERE special IN ('trash', 'junk'))"];
+	if (st && sqlite3_step(st) == SQLITE_ROW)
+		n = sqlite3_column_int(st, 0);
+	sqlite3_finalize(st);
+	[lock unlock];
+	return n;
 }
 
 - (int) unreadInInboxes

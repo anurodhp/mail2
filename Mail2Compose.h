@@ -28,6 +28,8 @@
 	BOOL sending, saving, dirty, closeAfterSave, sent;
 }
 + (Mail2Compose *) newMessageWithSessions: (NSArray *)sessions to: (NSString *)to;
+/* from a mailto: URL, with its cc, bcc, subject and body */
++ (Mail2Compose *) newMessageWithSessions: (NSArray *)sessions mailto: (NSString *)url;
 /* all: Reply All */
 + (Mail2Compose *) replyTo: (Mail2MessageInfo *)m parsed: (Mail2ParsedMessage *)p session: (Mail2Session *)s
                   sessions: (NSArray *)all replyAll: (BOOL)replyAll;

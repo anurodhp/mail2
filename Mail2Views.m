@@ -2,6 +2,7 @@
 #import "Mail2Views.h"
 #import "Mail2Util.h"
 #import "MilanText.h"
+#import "Mail2OAuth.h"
 #include <dlfcn.h>
 #include <unistd.h>
 
@@ -182,6 +183,7 @@ mailbox_icon(Mail2Mailbox *m)
 {
 	NSString *s = [m special];
 	if ([s isEqualToString: @"inbox"] || [s isEqualToString: @"allinboxes"]) return @"sb-inbox";
+	if ([s isEqualToString: @"flaggedsmart"]) return @"sb-flag";
 	if ([s isEqualToString: @"drafts"]) return @"sb-drafts";
 	if ([s isEqualToString: @"sent"]) return @"sb-sent";
 	if ([s isEqualToString: @"archive"] || [s isEqualToString: @"all"]) return @"sb-archive";
@@ -471,6 +473,7 @@ initials(NSString *name)
 {
 	[header release]; [attachBar release]; [scroll release]; [text release]; [empty release];
 	[msg release]; [attachments release]; [web release]; [inlineParts release]; [remoteBar release];
+	[unsubButton release]; [shown release];
 	[super dealloc];
 }
 
@@ -493,6 +496,8 @@ initials(NSString *name)
 	[web setHidden: YES];
 	[remoteBar setHidden: YES];
 	remoteBlocked = NO;
+	[unsubButton setHidden: YES];
+	DESTROY(shown);
 	[empty setStringValue: why ? why : @""];
 	[empty setHidden: NO];
 	[self setNeedsDisplay: YES];
@@ -592,6 +597,149 @@ initials(NSString *name)
 	[self showMessage: m body: body attachments: att html: nil inlineParts: nil];
 }
 
+/* ---- plain text: quotes, signature, links ---- */
+
+/* Quoted lines in the colours of their depth (as Apple Mail's bars), the signature after "-- " dimmed, and web and
+ * mail addresses as links (Mail2MessageView opens them). */
+void
+Mail2StyleBody(NSMutableAttributedString *as)
+{
+	static NSColor *depth[3];
+	if (depth[0] == nil) {
+		depth[0] = [[NSColor colorWithCalibratedRed: 0.16 green: 0.42 blue: 0.80 alpha: 1] retain];
+		depth[1] = [[NSColor colorWithCalibratedRed: 0.20 green: 0.55 blue: 0.30 alpha: 1] retain];
+		depth[2] = [[NSColor colorWithCalibratedRed: 0.70 green: 0.40 blue: 0.10 alpha: 1] retain];
+	}
+	NSString *t = [as string];
+	NSUInteger n = [t length], start = 0;
+	BOOL inSig = NO;
+	[as beginEditing];
+	while (start < n) {
+		NSRange line = [t lineRangeForRange: NSMakeRange(start, 0)];
+		NSString *l = [t substringWithRange: line];
+		NSString *bare = [l stringByTrimmingCharactersInSet: [NSCharacterSet newlineCharacterSet]];
+		if ([bare isEqualToString: @"-- "] || [bare isEqualToString: @"--"])
+			inSig = YES;
+		NSUInteger d = 0, i;
+		for (i = 0; i < [l length]; i++) {
+			unichar c = [l characterAtIndex: i];
+			if (c == '>') d++;
+			else if (c != ' ') break;
+		}
+		if (d > 0)
+			[as addAttribute: NSForegroundColorAttributeName value: depth[(d - 1) % 3] range: line];
+		else if (inSig)
+			[as addAttribute: NSForegroundColorAttributeName value: [NSColor colorWithCalibratedWhite: 0.45 alpha: 1] range: line];
+		start = NSMaxRange(line);
+	}
+	/* links: http(s)://, www., mailto: and bare addresses, to the first space or closing bracket */
+	NSCharacterSet *stop = [NSCharacterSet characterSetWithCharactersInString: @" \t\r\n<>\"()[]{}"];
+	static NSString *starts[] = { @"https://", @"http://", @"www.", @"mailto:" };
+	unsigned k;
+	for (k = 0; k < 4; k++) {
+		NSRange r = NSMakeRange(0, n);
+		for (;;) {
+			NSRange f = [t rangeOfString: starts[k] options: NSCaseInsensitiveSearch range: r];
+			if (f.location == NSNotFound)
+				break;
+			/* "www." inside a link already found */
+			if (f.location > 0 && ![stop characterIsMember: [t characterAtIndex: f.location - 1]] && k == 2) {
+				r = NSMakeRange(NSMaxRange(f), n - NSMaxRange(f));
+				continue;
+			}
+			NSUInteger e = f.location;
+			while (e < n && ![stop characterIsMember: [t characterAtIndex: e]])
+				e++;
+			/* a sentence's full stop or comma is not part of it */
+			while (e > NSMaxRange(f) && [@".,;:!?'" rangeOfString: [t substringWithRange: NSMakeRange(e - 1, 1)]].location != NSNotFound)
+				e--;
+			if (e > NSMaxRange(f)) {
+				NSString *u = [t substringWithRange: NSMakeRange(f.location, e - f.location)];
+				if (k == 2)
+					u = [@"http://" stringByAppendingString: u];
+				if ([as attribute: NSLinkAttributeName atIndex: f.location effectiveRange: NULL] == nil) {
+					NSRange lr = NSMakeRange(f.location, e - f.location);
+					[as addAttribute: NSLinkAttributeName value: u range: lr];
+					[as addAttribute: NSForegroundColorAttributeName value: depth[0] range: lr];
+					[as addAttribute: NSUnderlineStyleAttributeName value: [NSNumber numberWithInt: NSUnderlineStyleSingle] range: lr];
+				}
+			}
+			r = NSMakeRange(e, n - e);
+		}
+	}
+	[as endEditing];
+}
+
+/* ---- Unsubscribe ---- */
+
+- (void) setParsed: (Mail2ParsedMessage *)p
+{
+	ASSIGN(shown, p);
+	BOOL can = [p unsubscribeURL] != nil || [p unsubscribeMailto] != nil;
+	if (can && unsubButton == nil) {
+		unsubButton = [[NSButton alloc] initWithFrame: NSMakeRect(0, 0, 100, 22)];
+		[unsubButton setTitle: @"Unsubscribe"];
+		[unsubButton setBezelStyle: NSRoundedBezelStyle];
+		[unsubButton setFont: [NSFont systemFontOfSize: 11]];
+		[unsubButton setTarget: self];
+		[unsubButton setAction: @selector(unsubscribe:)];
+		[unsubButton setAutoresizingMask: NSViewMinXMargin];
+		[unsubButton setToolTip: @"Ask the sender to stop sending this list (List-Unsubscribe)"];
+		[self addSubview: unsubButton];
+	}
+	[unsubButton setFrameOrigin: NSMakePoint(NSWidth([self bounds]) - 116, 30)];
+	[unsubButton setHidden: !can];
+}
+
+- (void) unsubscribe: (id)sender
+{
+	Mail2ParsedMessage *p = shown;
+	NSString *who = [msg sender] ? [msg sender] : @"this sender";
+	if (p == nil || NSRunAlertPanel(@"Unsubscribe?", @"Ask %@ to stop sending you this mail?", @"Unsubscribe", @"Cancel",
+	    nil, who) != NSAlertDefaultReturn)
+		return;
+	if ([p unsubscribeOneClick]) {
+		/* RFC 8058: a POST does it, nothing to open */
+		NSString *url = [[p unsubscribeURL] copy];
+		[unsubButton setEnabled: NO];
+		[unsubButton setTitle: @"Unsubscribing…"];
+		dispatch_async(dispatch_get_global_queue(0, 0), ^{
+			int status = 0;
+			NSString *err = nil;
+			NSDictionary *d = Mail2PostForm(url, [NSDictionary dictionaryWithObject: @"One-Click" forKey: @"List-Unsubscribe"],
+			    &status, &err);
+			BOOL ok = d != nil && status >= 200 && status < 300;
+			[err retain];
+			Mail2RunOnMain(^{
+				[unsubButton setEnabled: YES];
+				[unsubButton setTitle: @"Unsubscribe"];
+				if (ok)
+					[unsubButton setHidden: YES];
+				NSRunAlertPanel(ok ? @"Unsubscribed" : @"Not Unsubscribed", ok ? @"The sender was asked to stop sending this mail."
+				    : @"The request failed (%@).", @"OK", nil, nil, err ? err : [NSString stringWithFormat: @"HTTP %d", status]);
+				[err release];
+				[url release];
+			});
+		});
+		return;
+	}
+	if ([p unsubscribeMailto]) {	/* a message to the list's address, ready to send */
+		id d = [NSApp delegate];
+		if ([d respondsToSelector: @selector(application:openFile:)])
+			[d application: NSApp openFile: [p unsubscribeMailto]];
+		return;
+	}
+	[self webView: nil openLink: [p unsubscribeURL]];	/* the list's own page, in the browser */
+}
+
+/* a link in the plain text */
+- (BOOL) textView: (NSTextView *)tv clickedOnLink: (id)link atIndex: (NSUInteger)i
+{
+	NSString *u = [link isKindOfClass: [NSURL class]] ? [link absoluteString] : [link description];
+	[self webView: nil openLink: u];
+	return YES;
+}
+
 /* ---- the web view's delegate ---- */
 
 - (void) webView: (id)v openLink: (NSString *)url
@@ -664,7 +812,10 @@ initials(NSString *name)
 	[self layoutAttachments];
 	NSDictionary *attrs = [NSDictionary dictionaryWithObjectsAndKeys: [NSFont systemFontOfSize: 13], NSFontAttributeName,
 	    [NSColor blackColor], NSForegroundColorAttributeName, nil];
-	[[text textStorage] setAttributedString: MilanDisplayString(body ? body : @"", attrs)];
+	NSMutableAttributedString *as = [[MilanDisplayString(body ? body : @"", attrs) mutableCopy] autorelease];
+	Mail2StyleBody(as);
+	[[text textStorage] setAttributedString: as];
+	[text setDelegate: (id)self];
 	[text scrollRangeToVisible: NSMakeRange(0, 0)];
 	[header setHidden: NO];
 	[attachBar setHidden: [att count] == 0];

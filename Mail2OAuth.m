@@ -139,11 +139,8 @@ Mail2PostForm(NSString *url, NSDictionary *form, int *status, NSString **err)
 	if ([[headers lowercaseString] rangeOfString: @"transfer-encoding: chunked"].location != NSNotFound)
 		content = dechunk(content);
 	id json = [content length] ? [NSJSONSerialization JSONObjectWithData: content options: 0 error: NULL] : nil;
-	if (![json isKindOfClass: [NSDictionary class]]) {
-		*err = [NSString stringWithFormat: @"%@ answered %d, not with JSON.", [u host], *status];
-		return nil;
-	}
-	return json;
+	/* an answer that is not JSON (an unsubscribe page) still has its status */
+	return [json isKindOfClass: [NSDictionary class]] ? json : [NSDictionary dictionary];
 }
 
 /* ---- PKCE and state ---- */

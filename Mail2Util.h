@@ -29,6 +29,9 @@ NSString *Mail2LongDate(NSDate *d);
 /* "12 KB" */
 NSString *Mail2ByteSize(unsigned long long n);
 
+/* A mailto: URL (RFC 6068) as {To, Cc, Bcc, Subject, Body}: the address part and its ?query, decoded. */
+NSDictionary *Mail2ParseMailto(NSString *url);
+
 /* The address in "Name <addr>" or bare "addr". */
 NSString *Mail2AddressPart(NSString *s);
 /* Splits "a@b, \"Last, First\" <c@d>" into address strings, honouring quotes and angle brackets. */

@@ -663,6 +663,38 @@ Mail2ClearDockBadge(void)
 	}
 }
 
+/* Undo of a move: the messages found again in dest by Message-ID (their UIDs there are new) and moved back */
+- (void) moveBackMessageIDs: (NSArray *)ids from: (Mail2Mailbox *)dest to: (Mail2Mailbox *)src
+{
+	if ([ids count] == 0 || dest == nil || src == nil)
+		return;
+	NSArray *mids = [ids copy];
+	NSString *dn = [[dest name] copy], *sn = [[src name] copy];
+	long long did = [dest mbid], sid = [src mbid];
+	[self run: @"Undoing…" work: ^BOOL (NSString **err) {
+		if (![imap select: dn uidValidity: NULL uidNext: NULL exists: NULL error: err])
+			return NO;
+		NSMutableArray *uids = [NSMutableArray array];
+		NSEnumerator *e = [mids objectEnumerator];
+		NSString *mid;
+		while ((mid = [e nextObject]) != nil) {
+			NSArray *u = [imap uidsWithMessageID: mid error: err];
+			if (u == nil)
+				return NO;
+			[uids addObjectsFromArray: u];
+		}
+		if ([uids count] && ![imap moveUids: uids to: sn error: err])
+			return NO;
+		[[Mail2Store sharedStore] removeUids: uids inMailbox: did];
+		[self postMessagesChanged: did];
+		Mail2Mailbox *s2 = [[Mail2Store sharedStore] mailboxWithID: sid];
+		return s2 == nil || [self q_sync: s2 error: err];
+	}];
+	[mids autorelease];
+	[dn autorelease];
+	[sn autorelease];
+}
+
 /* ---- mailboxes ---- */
 
 /* the prefix new top-level mailboxes need: "INBOX." on servers whose folders all live under the Inbox */

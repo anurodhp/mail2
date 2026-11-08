@@ -47,6 +47,8 @@
 	NSDictionary *inlineParts;
 	BOOL showingWeb;
 	NSView *remoteBar;		/* "remote content was not loaded" and its button */
+	NSButton *unsubButton;
+	Mail2ParsedMessage *shown;	/* for Unsubscribe and Show Raw Source */
 	BOOL remoteBlocked;		/* the shown HTML has remote content that was not loaded */
 }
 - (void) showNothing: (NSString *)why;		/* "No Message Selected", "3 messages selected" */
@@ -55,6 +57,8 @@
 - (void) showMessage: (Mail2MessageInfo *)m body: (NSString *)body attachments: (NSArray *)att
                 html: (NSString *)html inlineParts: (NSDictionary *)parts;
 - (Mail2MessageInfo *) message;
+/* the parsed message shown: an Unsubscribe button when it has List-Unsubscribe */
+- (void) setParsed: (Mail2ParsedMessage *)p;
 - (NSTextView *) textView;
 @end
 
@@ -83,6 +87,9 @@ BOOL Mail2WebViewInstalled(void);	/* the library is there (and has not failed): 
 /* small modal questions: a name (nil if cancelled), and one of the mailboxes (nil if cancelled) */
 NSString *Mail2AskString(NSString *title, NSString *message, NSString *initial, NSString *okTitle);
 Mail2Mailbox *Mail2ChooseMailbox(NSString *title, NSString *message, NSArray *mailboxes, NSString *okTitle);
+
+/* quote levels coloured, the signature dimmed, links (NSLinkAttributeName) in a plain-text body */
+void Mail2StyleBody(NSMutableAttributedString *as);
 
 /* tail-truncated attributed string with Milan's font fallback */
 NSAttributedString *Mail2FittedString(NSString *s, NSDictionary *attrs, CGFloat width);

@@ -371,3 +371,39 @@ Mail2EncodeMailboxName(NSString *s)
 	}
 	return out;
 }
+
+static NSString *
+pct(NSString *s)
+{
+	NSString *d = [[s stringByReplacingOccurrencesOfString: @"+" withString: @"%2B"] stringByReplacingPercentEscapesUsingEncoding: NSUTF8StringEncoding];
+	return d ? d : s;
+}
+
+NSDictionary *
+Mail2ParseMailto(NSString *url)
+{
+	NSMutableDictionary *r = [NSMutableDictionary dictionary];
+	NSString *s = [[url lowercaseString] hasPrefix: @"mailto:"] ? [url substringFromIndex: 7] : url;
+	NSRange q = [s rangeOfString: @"?"];
+	NSString *to = q.location == NSNotFound ? s : [s substringToIndex: q.location];
+	if ([to length])
+		[r setObject: pct(to) forKey: @"To"];
+	if (q.location != NSNotFound) {
+		NSEnumerator *e = [[[s substringFromIndex: q.location + 1] componentsSeparatedByString: @"&"] objectEnumerator];
+		NSString *kv;
+		while ((kv = [e nextObject]) != nil) {
+			NSRange eq = [kv rangeOfString: @"="];
+			if (eq.location == NSNotFound)
+				continue;
+			NSString *k = [[kv substringToIndex: eq.location] lowercaseString], *v = pct([kv substringFromIndex: eq.location + 1]);
+			NSString *key = [k isEqualToString: @"to"] ? @"To" : [k isEqualToString: @"cc"] ? @"Cc" : [k isEqualToString: @"bcc"] ? @"Bcc"
+			    : [k isEqualToString: @"subject"] ? @"Subject" : [k isEqualToString: @"body"] ? @"Body" : nil;
+			if (key == nil)
+				continue;
+			NSString *old = [r objectForKey: key];
+			[r setObject: old && ([key isEqualToString: @"To"] || [key isEqualToString: @"Cc"] || [key isEqualToString: @"Bcc"])
+			    ? [NSString stringWithFormat: @"%@, %@", old, v] : v forKey: key];
+		}
+	}
+	return r;
+}

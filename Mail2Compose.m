@@ -528,6 +528,21 @@ signature_block(Mail2Session *s)
 	return c;
 }
 
++ (Mail2Compose *) newMessageWithSessions: (NSArray *)all mailto: (NSString *)url
+{
+	NSDictionary *d = Mail2ParseMailto(url);
+	Mail2Compose *c = [self newMessageWithSessions: all to: [d objectForKey: @"To"]];
+	if ([d objectForKey: @"Cc"]) [c->ccField setStringValue: [d objectForKey: @"Cc"]];
+	if ([d objectForKey: @"Bcc"]) [c->bccField setStringValue: [d objectForKey: @"Bcc"]];
+	if ([d objectForKey: @"Subject"]) {
+		[c->subjectField setStringValue: [d objectForKey: @"Subject"]];
+		[c->window setTitle: [c plainTitle]];
+	}
+	if ([d objectForKey: @"Body"])
+		[c->bodyView setString: [[d objectForKey: @"Body"] stringByAppendingString: [c->bodyView string]]];
+	return c;
+}
+
 static NSString *
 own_address_filter(NSArray *addrs, NSString *mine, NSMutableSet *seen)
 {

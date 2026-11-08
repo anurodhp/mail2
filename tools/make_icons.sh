@@ -33,6 +33,9 @@ for pair in inbox:inbox drafts:file-pen sent:send archive:archive junk:octagon-a
     render "sb-$n"     "$s" 16 "#2f7fd8" 2
     render "sb-$n-sel" "$s" 16 "#ffffff" 2
 done
+# the Flagged smart mailbox: an orange flag, as the flags in the list
+render "sb-flag"     flag 16 "#f08c1a" 2
+render "sb-flag-sel" flag 16 "#ffffff" 2
 # the application icon
 "$T/make_icon" icons/Mail2.png
 sips -s format tiff icons/Mail2.png --out icons/Mail2.tiff > /dev/null

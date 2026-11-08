@@ -228,7 +228,7 @@ content_type(struct mailmime_content *ct)
 - (void) dealloc
 {
 	[body release]; [attachments release]; [messageId release]; [references release]; [inReplyTo release]; [bcc release];
-	[htmlSource release]; [inlineParts release];
+	[htmlSource release]; [inlineParts release]; [listUnsubscribe release];
 	[super dealloc];
 }
 
@@ -389,6 +389,15 @@ format_imf_list(struct mailimf_address_list *l)
 			} else if (f->fld_type == MAILIMF_FIELD_IN_REPLY_TO && f->fld_data.fld_in_reply_to &&
 			           clist_begin(f->fld_data.fld_in_reply_to->mid_list))
 				ASSIGN(p->inReplyTo, msgid_string(clist_content(clist_begin(f->fld_data.fld_in_reply_to->mid_list))));
+			else if (f->fld_type == MAILIMF_FIELD_OPTIONAL_FIELD && f->fld_data.fld_optional_field &&
+			         f->fld_data.fld_optional_field->fld_name && f->fld_data.fld_optional_field->fld_value) {
+				const char *n = f->fld_data.fld_optional_field->fld_name;
+				NSString *v = [[[NSString alloc] initWithUTF8String: f->fld_data.fld_optional_field->fld_value] autorelease];
+				if (strcasecmp(n, "List-Unsubscribe") == 0)
+					ASSIGN(p->listUnsubscribe, v);
+				else if (strcasecmp(n, "List-Unsubscribe-Post") == 0)
+					p->oneClick = [[v lowercaseString] rangeOfString: @"list-unsubscribe=one-click"].location != NSNotFound;
+			}
 			else if (f->fld_type == MAILIMF_FIELD_BCC && f->fld_data.fld_bcc)
 				ASSIGN(p->bcc, format_imf_list(f->fld_data.fld_bcc->bcc_addr_list));
 		}
@@ -399,6 +408,46 @@ format_imf_list(struct mailimf_address_list *l)
 
 - (NSString *) body { return body; }
 - (NSString *) htmlSource { return htmlSource; }
+
+/* the <...> entries of List-Unsubscribe */
+- (NSArray *) unsubscribeTargets
+{
+	NSMutableArray *r = [NSMutableArray array];
+	NSScanner *sc = [NSScanner scannerWithString: listUnsubscribe ? listUnsubscribe : @""];
+	while (![sc isAtEnd]) {
+		NSString *u = nil;
+		[sc scanUpToString: @"<" intoString: NULL];
+		if (![sc scanString: @"<" intoString: NULL] || ![sc scanUpToString: @">" intoString: &u])
+			break;
+		[sc scanString: @">" intoString: NULL];
+		u = [u stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+		if ([u length])
+			[r addObject: u];
+	}
+	return r;
+}
+
+- (NSString *) unsubscribeURL
+{
+	NSEnumerator *e = [[self unsubscribeTargets] objectEnumerator];
+	NSString *u;
+	while ((u = [e nextObject]) != nil)
+		if ([[u lowercaseString] hasPrefix: @"https:"])
+			return u;
+	return nil;
+}
+
+- (NSString *) unsubscribeMailto
+{
+	NSEnumerator *e = [[self unsubscribeTargets] objectEnumerator];
+	NSString *u;
+	while ((u = [e nextObject]) != nil)
+		if ([[u lowercaseString] hasPrefix: @"mailto:"])
+			return u;
+	return nil;
+}
+
+- (BOOL) unsubscribeOneClick { return oneClick && [self unsubscribeURL] != nil; }
 - (NSDictionary *) inlineParts { return inlineParts; }
 - (BOOL) bodyWasHTML { return html; }
 - (NSArray *) attachments { return attachments; }

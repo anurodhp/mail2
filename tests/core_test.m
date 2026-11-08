@@ -723,6 +723,56 @@ main(void)
 		[rs release];
 	}
 
+	printf("Flagged, mailto, unsubscribe, undo\n");
+	{
+		Mail2Session *us = [[Mail2Session alloc] initWithAccount: a1];
+		[us refreshMailboxes];
+		wait_for(^BOOL { return ![us isBusy]; }, 20);
+		Mail2Mailbox *ib = [us mailboxWithSpecial: @"inbox"], *trash = [us mailboxWithSpecial: @"trash"];
+		[us syncMailbox: ib];
+		wait_for(^BOOL { return ![us isBusy]; }, 20);
+		NSArray *two = [store messagesInMailbox: [ib mbid] limit: 2];
+		[us setFlag: Mail2FlagFlagged on: YES forMessages: two];
+		wait_for(^BOOL { return ![us isBusy]; }, 20);
+		CHECK([store flaggedCount] >= 2 && [[store messagesInMailbox: Mail2FlaggedID limit: 100] count] == (NSUInteger)[store flaggedCount],
+		    "Flagged: every flagged message (%d)", [store flaggedCount]);
+
+		NSDictionary *mt = Mail2ParseMailto(@"mailto:list@example.com?subject=unsubscribe%20me&body=please&cc=a@b.c");
+		CHECK([[mt objectForKey: @"To"] isEqualToString: @"list@example.com"] && [[mt objectForKey: @"Subject"] isEqualToString: @"unsubscribe me"] &&
+		    [[mt objectForKey: @"Body"] isEqualToString: @"please"] && [[mt objectForKey: @"Cc"] isEqualToString: @"a@b.c"], "mailto: with a query");
+
+		const char *lu = "From: news@example.com\r\nTo: test1@localhost\r\nSubject: News\r\nMessage-ID: <n1@example.com>\r\n"
+		    "List-Unsubscribe: <mailto:leave@example.com?subject=leave>, <https://example.com/u/123>\r\n"
+		    "List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\r\nhello\r\n";
+		Mail2ParsedMessage *pu = [Mail2ParsedMessage parseData: [NSData dataWithBytes: lu length: strlen(lu)] preferPlainText: YES];
+		CHECK([[pu unsubscribeURL] isEqualToString: @"https://example.com/u/123"] &&
+		    [[pu unsubscribeMailto] isEqualToString: @"mailto:leave@example.com?subject=leave"] && [pu unsubscribeOneClick],
+		    "List-Unsubscribe: https, mailto, one-click");
+		int st = 0;
+		NSString *perr = nil;
+		NSDictionary *pr = Mail2PostForm(@"http://127.0.0.1:3080/last", [NSDictionary dictionaryWithObject: @"One-Click" forKey: @"List-Unsubscribe"], &st, &perr);
+		CHECK(pr != nil && st == 200, "a form POST (as one-click unsubscribe sends) answered %d", st);
+
+		/* undo of a delete: by Message-ID from the Trash back to the Inbox */
+		NSArray *one = [store messagesInMailbox: [ib mbid] limit: 1];
+		NSString *mid = [[one objectAtIndex: 0] messageId];
+		NSUInteger before = [[store messagesInMailbox: [ib mbid] limit: 1000] count];
+		[us moveMessages: one toMailbox: trash];
+		wait_for(^BOOL { return ![us isBusy]; }, 20);
+		CHECK([[store messagesInMailbox: [ib mbid] limit: 1000] count] == before - 1, "deleted to the Trash");
+		[us moveBackMessageIDs: [NSArray arrayWithObject: mid] from: trash to: ib];
+		wait_for(^BOOL { return ![us isBusy]; }, 20);
+		NSArray *back = [store messagesInMailbox: [ib mbid] limit: 1000];
+		BOOL found = NO;
+		NSEnumerator *be = [back objectEnumerator];
+		Mail2MessageInfo *bm;
+		while ((bm = [be nextObject]) != nil)
+			if ([[bm messageId] isEqualToString: mid])
+				found = YES;
+		CHECK(found && [back count] == before, "Undo: back in the Inbox (%@)", [us lastError] ? [us lastError] : @"");
+		[us release];
+	}
+
 	printf("\n%d checks, %d failed\n", checks, failures);
 	[pool release];
 	return failures ? 1 : 0;

@@ -51,6 +51,8 @@ extern NSString *const Mail2StatusChanged;
 - (void) moveMessages: (NSArray *)msgs toSpecial: (NSString *)special;
 /* to one of this account's mailboxes (Move To, a drop on the sidebar) */
 - (void) moveMessages: (NSArray *)msgs toMailbox: (Mail2Mailbox *)dest;
+/* Undo of a move: the messages with these Message-IDs go from dest back to src */
+- (void) moveBackMessageIDs: (NSArray *)ids from: (Mail2Mailbox *)dest to: (Mail2Mailbox *)src;
 /* folders: a new one at the top (under INBOX. on servers that keep them there), and renaming or deleting one of the
  * user's own (never a special mailbox) */
 - (void) createMailboxNamed: (NSString *)name;

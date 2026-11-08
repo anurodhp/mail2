@@ -207,6 +207,7 @@ scroller_for(NSTableView *t, NSRect r)
 	[sidebarCell release]; [messageCell release]; [messageView release]; [statusField release]; [buttons release];
 	[current release]; [messages release]; [parsed release];
 	[searchField release]; [searchText release]; [serverHits release]; [expanded release]; [childRows release];
+	[undo release];
 	[super dealloc];
 }
 
@@ -267,9 +268,10 @@ scroller_for(NSTableView *t, NSRect r)
 	return nil;
 }
 
+/* All Inboxes or Flagged: messages of several mailboxes and accounts */
 - (BOOL) showingAllInboxes
 {
-	return current != nil && [current mbid] == Mail2AllInboxesID;
+	return current != nil && [current isVirtual];
 }
 
 /* the account of the mailbox shown; in All Inboxes, of the selected message (else the first account) */
@@ -318,6 +320,10 @@ scroller_for(NSTableView *t, NSRect r)
 	[sidebarItems removeAllObjects];
 	if ([sessions count] > 1)
 		[sidebarItems addObject: [Mail2Mailbox allInboxes]];
+	/* Flagged, while there is something flagged (or it is the mailbox shown) */
+	Mail2Mailbox *fl = [Mail2Mailbox flagged];
+	if ([sessions count] > 0 && ([fl unread] > 0 || [current mbid] == Mail2FlaggedID))
+		[sidebarItems addObject: fl];
 	while ((s = [e nextObject]) != nil) {
 		NSArray *boxes = [[Mail2Store sharedStore] mailboxesForAccount: [[s account] identifier]];
 		[sidebarItems addObject: [[s account] email]];
@@ -525,14 +531,22 @@ scroller_for(NSTableView *t, NSRect r)
 - (void) messagesChanged: (NSNotification *)n
 {
 	long long mbid = [[[n userInfo] objectForKey: @"Mailbox"] longLongValue];
-	if (current != nil && (mbid == [current mbid] ||
-	    ([self showingAllInboxes] && [[[[Mail2Store sharedStore] mailboxWithID: mbid] special] isEqualToString: @"inbox"])))
+	if (current != nil && (mbid == [current mbid] || [current mbid] == Mail2FlaggedID ||
+	    ([current mbid] == Mail2AllInboxesID && [[[[Mail2Store sharedStore] mailboxWithID: mbid] special] isEqualToString: @"inbox"])))
 		[self reloadMessages];
+	/* Flagged comes and goes with the flagged messages */
+	BOOL listed = NO;
+	NSUInteger j;
+	for (j = 0; j < [sidebarItems count]; j++)
+		if ([[sidebarItems objectAtIndex: j] isKindOfClass: [Mail2Mailbox class]] && [[sidebarItems objectAtIndex: j] mbid] == Mail2FlaggedID)
+			listed = YES;
+	if (listed != ([[Mail2Store sharedStore] flaggedCount] > 0 || [current mbid] == Mail2FlaggedID))
+		[self reloadSidebar];
 	/* the unread counts */
 	NSUInteger i;
 	for (i = 0; i < [sidebarItems count]; i++) {
 		id it = [sidebarItems objectAtIndex: i];
-		if ([it isKindOfClass: [Mail2Mailbox class]] && ([it mbid] == mbid || [it mbid] == Mail2AllInboxesID)) {
+		if ([it isKindOfClass: [Mail2Mailbox class]] && ([it mbid] == mbid || [it isVirtual])) {
 			((Mail2Mailbox *)it)->unread = [[Mail2Store sharedStore] unreadInMailbox: [it mbid]];
 			[sidebar setNeedsDisplayInRect: [sidebar rectOfRow: i]];
 		}
@@ -736,9 +750,11 @@ scroller_for(NSTableView *t, NSRect r)
 				NSLog(@"Mail2: parsed uid %u: %lu characters, %s", [m uid], (unsigned long)[[p body] length], gen == showGeneration ? "shown" : "stale");
 			if (gen == showGeneration) {
 				ASSIGN(parsed, p);
-				if (p != nil)
+				if (p != nil) {
 					[messageView showMessage: m body: [p body] attachments: [p attachments] html: [p htmlSource]
 					    inlineParts: [p inlineParts]];
+					[messageView setParsed: p];
+				}
 				else
 					[messageView showMessage: m body: @"This message could not be read." attachments: nil];
 				[self updateButtons];
@@ -800,6 +816,8 @@ scroller_for(NSTableView *t, NSRect r)
 		    ![[current special] isEqualToString: @"all"];
 	if (a == @selector(deleteMessages:) || a == @selector(toggleFlag:) || a == @selector(toggleRead:))
 		return [[self selectedMessages] count] > 0;
+	if (a == @selector(showSource:))
+		return [self selectedMessage] != nil;
 	if (a == @selector(moveTo:) || a == @selector(markJunk:) || a == @selector(applyRules:))
 		return [[self selectedMessages] count] > 0;
 	if (a == @selector(renameMailbox:) || a == @selector(deleteMailbox:))
@@ -907,6 +925,61 @@ scroller_for(NSTableView *t, NSRect r)
 	[self showSelection];
 }
 
+/* ---- moves that Edit > Undo takes back ---- */
+
+- (NSUndoManager *) windowWillReturnUndoManager: (NSWindow *)w
+{
+	if (undo == nil)
+		undo = [[NSUndoManager alloc] init];
+	return undo;
+}
+
+/* moves the account's messages to dest and remembers how to bring them back (by Message-ID, per source mailbox) */
+- (void) move: (NSArray *)mine of: (Mail2Session *)s to: (Mail2Mailbox *)dest action: (NSString *)name
+{
+	NSMutableDictionary *bySource = [NSMutableDictionary dictionary];
+	NSEnumerator *e = [mine objectEnumerator];
+	Mail2MessageInfo *m;
+	while ((m = [e nextObject]) != nil) {
+		if ([m messageId] == nil || [m mbid] == [dest mbid])
+			continue;
+		NSNumber *k = [NSNumber numberWithLongLong: [m mbid]];
+		NSMutableArray *a = [bySource objectForKey: k];
+		if (a == nil)
+			[bySource setObject: (a = [NSMutableArray array]) forKey: k];
+		[a addObject: [m messageId]];
+	}
+	[s moveMessages: mine toMailbox: dest];
+	NSUndoManager *um = [self windowWillReturnUndoManager: window];
+	NSEnumerator *ke = [bySource keyEnumerator];
+	NSNumber *k;
+	while ((k = [ke nextObject]) != nil) {
+		Mail2Mailbox *src = [[Mail2Store sharedStore] mailboxWithID: [k longLongValue]];
+		if (src == nil)
+			continue;
+		[[um prepareWithInvocationTarget: self] moveBack: [bySource objectForKey: k] of: s from: dest to: src action: name];
+		[um setActionName: name];
+	}
+}
+
+/* the undo (and, the other way round, the redo) of a move */
+- (void) moveBack: (NSArray *)ids of: (Mail2Session *)s from: (Mail2Mailbox *)from to: (Mail2Mailbox *)to action: (NSString *)name
+{
+	[s moveBackMessageIDs: ids from: from to: to];
+	NSUndoManager *um = [self windowWillReturnUndoManager: window];
+	[[um prepareWithInvocationTarget: self] moveBack: ids of: s from: to to: from action: name];
+	[um setActionName: name];
+}
+
+/* the destination of Archive, Delete or Junk for an account; nil when it has none (Delete in the Trash: for good) */
+- (Mail2Mailbox *) destination: (NSString *)special of: (Mail2Session *)s
+{
+	Mail2Mailbox *d = [s mailboxWithSpecial: special];
+	if (d == nil && [special isEqualToString: @"archive"])
+		d = [s mailboxWithSpecial: @"all"];
+	return d;
+}
+
 - (void) archive: (id)sender
 {
 	if (![self validateAction: _cmd])
@@ -921,7 +994,9 @@ scroller_for(NSTableView *t, NSRect r)
 		return;
 	}
 	[self removeSelectedThen: ^(NSArray *msgs) {
-		[self eachSession: msgs do: ^(Mail2Session *s, NSArray *mine) { [s moveMessages: mine toSpecial: @"archive"]; }];
+		[self eachSession: msgs do: ^(Mail2Session *s, NSArray *mine) {
+			[self move: mine of: s to: [self destination: @"archive" of: s] action: @"Archive"];
+		}];
 	}];
 }
 
@@ -932,7 +1007,13 @@ scroller_for(NSTableView *t, NSRect r)
 	        @"Delete", @"Cancel", nil) != NSAlertDefaultReturn)
 		return;
 	[self removeSelectedThen: ^(NSArray *msgs) {
-		[self eachSession: msgs do: ^(Mail2Session *s, NSArray *mine) { [s moveMessages: mine toSpecial: @"trash"]; }];
+		[self eachSession: msgs do: ^(Mail2Session *s, NSArray *mine) {
+			Mail2Mailbox *trash = [self destination: @"trash" of: s];
+			if (trash == nil || [[current special] isEqualToString: @"trash"])
+				[s moveMessages: mine toSpecial: @"trash"];	/* for good: nothing to undo */
+			else
+				[self move: mine of: s to: trash action: @"Delete"];
+		}];
 	}];
 }
 
@@ -972,7 +1053,47 @@ scroller_for(NSTableView *t, NSRect r)
 	Mail2Mailbox *dest = Mail2ChooseMailbox(@"Move To", [NSString stringWithFormat: n == 1 ? @"Move the message to:"
 	    : @"Move the %lu messages to:", n], boxes, @"Move");
 	if (dest != nil)
-		[self removeSelectedThen: ^(NSArray *msgs) { [s moveMessages: msgs toMailbox: dest]; }];
+		[self removeSelectedThen: ^(NSArray *msgs) { [self move: msgs of: s to: dest action: @"Move"]; }];
+}
+
+/* the message as it came, in a window of its own */
+- (void) showSource: (id)sender
+{
+	Mail2MessageInfo *m = [self selectedMessage];
+	NSString *path = m ? [[Mail2Store sharedStore] pathForMessage: m] : nil;
+	NSData *raw = path ? [NSData dataWithContentsOfFile: path] : nil;
+	if (raw == nil) {
+		if (m != nil)
+			NSRunAlertPanel(@"Raw Source", @"The message is not downloaded yet: show it first.", @"OK", nil, nil);
+		return;
+	}
+	NSString *text = [[[NSString alloc] initWithData: raw encoding: NSUTF8StringEncoding] autorelease];
+	if (text == nil)
+		text = [[[NSString alloc] initWithData: raw encoding: NSISOLatin1StringEncoding] autorelease];
+	NSRect f = NSOffsetRect([window frame], 40, -40);
+	f.size = NSMakeSize(720, 560);
+	NSWindow *w = [[NSWindow alloc] initWithContentRect: f
+	    styleMask: NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask
+	    backing: NSBackingStoreBuffered defer: NO];
+	[w setTitle: [NSString stringWithFormat: @"Source: %@", [[m subject] length] ? [m subject] : @"(no subject)"]];
+	[w setReleasedWhenClosed: YES];
+	NSScrollView *sv = [[[NSScrollView alloc] initWithFrame: [[w contentView] bounds]] autorelease];
+	[sv setHasVerticalScroller: YES];
+	[sv setHasHorizontalScroller: YES];
+	[sv setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
+	NSTextView *tv = [[[NSTextView alloc] initWithFrame: NSMakeRect(0, 0, [sv contentSize].width, [sv contentSize].height)] autorelease];
+	[tv setEditable: NO];
+	[tv setRichText: NO];
+	[tv setFont: [NSFont userFixedPitchFontOfSize: 11]];
+	[tv setHorizontallyResizable: YES];
+	[tv setVerticallyResizable: YES];
+	[tv setMaxSize: NSMakeSize(1e7, 1e7)];
+	[[tv textContainer] setContainerSize: NSMakeSize(1e7, 1e7)];
+	[[tv textContainer] setWidthTracksTextView: NO];
+	[tv setString: text];
+	[sv setDocumentView: tv];
+	[[w contentView] addSubview: sv];
+	[w makeKeyAndOrderFront: nil];
 }
 
 - (void) applyRules: (id)sender
@@ -995,10 +1116,8 @@ scroller_for(NSTableView *t, NSRect r)
 	}
 	[self removeSelectedThen: ^(NSArray *msgs) {
 		[self eachSession: msgs do: ^(Mail2Session *s, NSArray *mine) {
-			if (inJunk)
-				[s moveMessages: mine toMailbox: [s mailboxWithSpecial: @"inbox"]];
-			else
-				[s moveMessages: mine toSpecial: @"junk"];
+			[self move: mine of: s to: [self destination: inJunk ? @"inbox" : @"junk" of: s]
+			    action: inJunk ? @"Not Junk" : @"Mark as Junk"];
 		}];
 	}];
 }
@@ -1098,7 +1217,7 @@ scroller_for(NSTableView *t, NSRect r)
 	if (t != sidebar || row < 0 || row >= (NSInteger)[sidebarItems count])
 		return NSDragOperationNone;
 	id it = [sidebarItems objectAtIndex: row];
-	if (![it isKindOfClass: [Mail2Mailbox class]] || ![it selectable] || [it mbid] == Mail2AllInboxesID)
+	if (![it isKindOfClass: [Mail2Mailbox class]] || ![it selectable] || [it isVirtual])
 		return NSDragOperationNone;
 	NSArray *msgs = [self draggedMessages: info];
 	if ([msgs count] == 0)
@@ -1121,7 +1240,7 @@ scroller_for(NSTableView *t, NSRect r)
 	Mail2Mailbox *dest = [sidebarItems objectAtIndex: row];
 	NSArray *msgs = [self draggedMessages: info];
 	Mail2Session *s = [self sessionForAccount: [dest account]];
-	[s moveMessages: msgs toMailbox: dest];
+	[self move: msgs of: s to: dest action: @"Move"];
 	[self reloadMessages];
 	[self showSelection];
 	return YES;

@@ -88,7 +88,7 @@ mailto_argument(void)
 			continue;
 		}
 		if ([[a lowercaseString] hasPrefix: @"mailto:"])
-			return [[a substringFromIndex: 7] stringByReplacingPercentEscapesUsingEncoding: NSUTF8StringEncoding];
+			return a;
 	}
 	return nil;
 }
@@ -251,7 +251,7 @@ static NSString *volatile heartbeatMode;
 	NSDictionary *opts = [NSDictionary dictionaryWithObjectsAndKeys:
 	    @"Mail2", @"ApplicationName",
 	    @"A small IMAP mail client for GNUstep.", @"ApplicationDescription",
-	    @"0.4", @"ApplicationRelease",
+	    @"0.5", @"ApplicationRelease",
 	    [NSArray arrayWithObject: @"Anurodh Pokharel"], @"Authors",
 	    @"Copyright © 2026 Anurodh Pokharel. MIT license.", @"Copyright",
 	    @"Mail by libetpan 1.9.4 (BSD), SQLite 3.44 (public domain) and Mbed TLS 3.6 (Apache-2.0). Icons from Lucide (ISC).",
@@ -275,6 +275,7 @@ static NSString *volatile heartbeatMode;
 - (void) editDraft: (id)s { [viewer editDraft: s]; }
 - (void) moveTo: (id)s { [viewer moveTo: s]; }
 - (void) applyRules: (id)s { [viewer applyRules: s]; }
+- (void) showSource: (id)s { [viewer showSource: s]; }
 
 - (void) showRules: (id)sender
 {
@@ -327,6 +328,7 @@ static NSString *volatile heartbeatMode;
 
 	m = [[NSMenu alloc] initWithTitle: @"Edit"];
 	add_item(m, @"Undo", @selector(undo:), @"z", nil);
+	add_item(m, @"Redo", @selector(redo:), @"Z", nil);
 	add_item(m, @"Cut", @selector(cut:), @"x", nil);
 	add_item(m, @"Copy", @selector(copy:), @"c", nil);
 	add_item(m, @"Paste", @selector(paste:), @"v", nil);
@@ -357,6 +359,7 @@ static NSString *volatile heartbeatMode;
 	add_item(m, @"Move To…", @selector(moveTo:), @"M", self);
 	add_item(m, @"Mark as Junk", @selector(markJunk:), @"J", self);
 	add_item(m, @"Apply Rules", @selector(applyRules:), nil, self);
+	add_item(m, @"Show Raw Source", @selector(showSource:), @"u", self);
 	add_item(m, @"Mark as Read/Unread", @selector(toggleRead:), @"U", self);
 	add_item(m, @"Flag/Unflag", @selector(toggleFlag:), @"L", self);
 	[main setSubmenu: m forItem: add_item(main, @"Message", NULL, nil, nil)]; [m release];
@@ -391,15 +394,14 @@ static NSString *volatile heartbeatMode;
 		[self addAccount: nil];
 	NSString *to = mailto_argument();
 	if (to != nil && [sessions count] > 0)
-		[Mail2Compose newMessageWithSessions: sessions to: to];
+		[Mail2Compose newMessageWithSessions: sessions mailto: to];
 }
 
 /* mailto: from Milan or Florence (NSWorkspace openURL / openFile) */
 - (BOOL) application: (NSApplication *)app openFile: (NSString *)file
 {
 	if ([[file lowercaseString] hasPrefix: @"mailto:"] && [sessions count] > 0) {
-		[Mail2Compose newMessageWithSessions: sessions to: [[file substringFromIndex: 7]
-		    stringByReplacingPercentEscapesUsingEncoding: NSUTF8StringEncoding]];
+		[Mail2Compose newMessageWithSessions: sessions mailto: file];
 		return YES;
 	}
 	return NO;

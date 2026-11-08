@@ -35,5 +35,6 @@
 @end
 
 /* An HTTP(S) POST of a form, the answer parsed as JSON (an error status still returns the body: OAuth errors are
- * JSON). nil with *err when there is no answer. Used by Mail2OAuth; exposed for the tests. */
+ * JSON; an answer that is not JSON gives an empty dictionary, with *status). nil with *err when there is no answer.
+ * Used by Mail2OAuth and the one-click unsubscribe. */
 NSDictionary *Mail2PostForm(NSString *url, NSDictionary *form, int *status, NSString **err);

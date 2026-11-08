@@ -16,6 +16,8 @@ enum {
 
 /* the mailbox id that stands for every account's Inbox in the message queries (the viewer's All Inboxes) */
 #define Mail2AllInboxesID (-1LL)
+/* and for every flagged message of every account (not in Trash or Junk): the Flagged smart mailbox */
+#define Mail2FlaggedID (-2LL)
 
 @interface Mail2Mailbox : NSObject
 {
@@ -37,6 +39,8 @@ enum {
 - (int) unread;
 - (int) depth;			/* nesting level below its account */
 + (Mail2Mailbox *) allInboxes;	/* the viewer's All Inboxes, unread counted across the accounts */
++ (Mail2Mailbox *) flagged;	/* the Flagged smart mailbox, its count the flagged messages */
+- (BOOL) isVirtual;		/* All Inboxes or Flagged: messages of several mailboxes, no account of its own */
 @end
 
 @interface Mail2MessageInfo : NSObject
@@ -98,7 +102,7 @@ enum {
 - (void) removeAccount: (NSString *)account;
 
 /* ---- messages ---- */
-/* the message queries below take Mail2AllInboxesID for every account's Inbox together */
+/* the message queries below take Mail2AllInboxesID for every account's Inbox together, and Mail2FlaggedID */
 - (NSArray *) messagesInMailbox: (long long)mbid limit: (int)limit;	/* newest first */
 /* the newest message of each conversation, newest first, with -threadCount and -threadUnread */
 - (NSArray *) conversationsInMailbox: (long long)mbid limit: (int)limit;
@@ -117,7 +121,8 @@ enum {
 - (void) removeUids: (NSArray *)uids inMailbox: (long long)mbid;
 - (void) removeMessage: (long long)rowid;
 - (int) unreadInMailbox: (long long)mbid;
-- (int) unreadInInboxes;	/* every account's Inbox: the dock badge */
+- (int) unreadInInboxes;
+- (int) flaggedCount;	/* every account's Inbox: the dock badge */
 /* the newest messages without a file, for prefetching */
 - (NSArray *) messagesToPrefetchInMailbox: (long long)mbid limit: (int)limit maxSize: (unsigned long long)maxSize;
 
