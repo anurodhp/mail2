@@ -98,7 +98,7 @@ tools/qemu_shots.sh       # the app on the Darwin desktop under QEMU, with scree
 
 `run_host_tests.sh` builds libetpan, Mbed TLS and Hunspell for the Mac from iokit's pinned sources, compiles Mail2's own core with Apple's Foundation and runs 171 checks against GreenMail (fetched once, pinned by checksum), with small stand-ins for the OAuth providers (`tests/oauth_mock.py`) for ManageSieve (`tests/sieve_mock.py`) and for an IMAP server with LIST-STATUS (`tests/imap_list_status_mock.py`): TLS, logins, sync and IDLE, MIME and HTML, sending, drafts, the Outbox, rich text, spelling, search, conversations, rules, snooze, folders, and more. `qemu_shots.sh` boots the real desktop under QEMU and drives Mail2 against GreenMail on the host: syncing, conversations, search, reopening a draft and sending it, typing and sending a new message, HTML mail in WebKit, and two accounts.
 
-As of November 8, 2026 (version 0.9) Mail2 runs on a real Pi 3 with Naples and Florence; it has not yet been used with a real Google or Microsoft account, nor tested against a server with CONDSTORE. On the Pi, `MAIL2_DEBUG=1 /Applications/Mail2.app/Mail2` logs the IMAP and SMTP conversation (passwords are left out).
+As of November 8, 2026 (version 0.10) Mail2 runs on a real Pi 3 with Naples and Florence; it has not yet been used with a real Google or Microsoft account, nor tested against a server with CONDSTORE. On the Pi, `MAIL2_DEBUG=1 /Applications/Mail2.app/Mail2` logs the IMAP and SMTP conversation (passwords are left out).
 
 ## Defaults
 
