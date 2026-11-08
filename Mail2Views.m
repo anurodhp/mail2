@@ -185,6 +185,7 @@ mailbox_icon(Mail2Mailbox *m)
 	NSString *s = [m special];
 	if ([s isEqualToString: @"inbox"] || [s isEqualToString: @"allinboxes"]) return @"sb-inbox";
 	if ([s isEqualToString: @"flaggedsmart"]) return @"sb-flag";
+	if ([s isEqualToString: @"outbox"]) return @"sb-sent";
 	if ([s isEqualToString: @"drafts"]) return @"sb-drafts";
 	if ([s isEqualToString: @"sent"]) return @"sb-sent";
 	if ([s isEqualToString: @"archive"] || [s isEqualToString: @"all"]) return @"sb-archive";
@@ -1020,4 +1021,37 @@ Mail2ChooseMailbox(NSString *title, NSString *message, NSArray *mailboxes, NSStr
 		return nil;
 	NSInteger rc = run_question(title, message, pop, okTitle);
 	return rc == NSOKButton ? [[pop selectedItem] representedObject] : nil;
+}
+
+NSDate *
+Mail2ChooseSendTime(void)
+{
+	NSCalendarDate *now = [NSCalendarDate calendarDate];
+	NSCalendarDate *today8 = [NSCalendarDate dateWithYear: [now yearOfCommonEra] month: [now monthOfYear] day: [now dayOfMonth]
+	    hour: 8 minute: 0 second: 0 timeZone: [now timeZone]];
+	NSCalendarDate *evening = [today8 dateByAddingYears: 0 months: 0 days: 0 hours: 10 minutes: 0 seconds: 0];
+	if ([evening timeIntervalSinceNow] < 600)
+		evening = [evening dateByAddingYears: 0 months: 0 days: 1 hours: 0 minutes: 0 seconds: 0];
+	NSCalendarDate *tomorrow = [today8 dateByAddingYears: 0 months: 0 days: 1 hours: 0 minutes: 0 seconds: 0];
+	int toMonday = (8 - [now dayOfWeek]) % 7;
+	NSCalendarDate *monday = [today8 dateByAddingYears: 0 months: 0 days: toMonday ? toMonday : 7 hours: 0 minutes: 0 seconds: 0];
+	NSArray *when = [NSArray arrayWithObjects: [NSDate dateWithTimeIntervalSinceNow: 3600], evening, tomorrow, monday, nil];
+	NSArray *titles = [NSArray arrayWithObjects: @"In an hour", [NSString stringWithFormat: @"This evening (%@)", Mail2LongDate(evening)],
+	    [NSString stringWithFormat: @"Tomorrow morning (%@)", Mail2LongDate(tomorrow)],
+	    [NSString stringWithFormat: @"Monday morning (%@)", Mail2LongDate(monday)], @"At a time I type…", nil];
+	NSPopUpButton *pop = [[[NSPopUpButton alloc] initWithFrame: NSMakeRect(0, 0, 368, 26) pullsDown: NO] autorelease];
+	[pop addItemsWithTitles: titles];
+	if (run_question(@"Send Later", @"Send the message:", pop, @"Schedule") != NSOKButton)
+		return nil;
+	NSInteger i = [pop indexOfSelectedItem];
+	if (i >= 0 && i < (NSInteger)[when count])
+		return [when objectAtIndex: i];
+	NSString *typed = Mail2AskString(@"Send Later", @"Date and time (YYYY-MM-DD HH:MM):",
+	    [tomorrow descriptionWithCalendarFormat: @"%Y-%m-%d %H:%M"], @"Schedule");
+	NSCalendarDate *d = typed ? [NSCalendarDate dateWithString: typed calendarFormat: @"%Y-%m-%d %H:%M"] : nil;
+	if (typed != nil && (d == nil || [d timeIntervalSinceNow] < 0)) {
+		NSRunAlertPanel(@"Send Later", @"“%@” is not a time to come (YYYY-MM-DD HH:MM).", @"OK", nil, nil, typed);
+		return nil;
+	}
+	return d;
 }

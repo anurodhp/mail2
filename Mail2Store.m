@@ -21,6 +21,18 @@
 - (NSString *) description { return [NSString stringWithFormat: @"<Mailbox %lld %@>", mbid, name]; }
 - (BOOL) isVirtual { return mbid < 0; }
 
++ (Mail2Mailbox *) outbox: (int)count
+{
+	Mail2Mailbox *m = [[[Mail2Mailbox alloc] init] autorelease];
+	m->mbid = Mail2OutboxID;
+	m->name = [@"" retain];
+	m->displayName = [@"Outbox" retain];
+	m->special = [@"outbox" retain];
+	m->selectable = YES;
+	m->unread = count;
+	return m;
+}
+
 + (Mail2Mailbox *) flagged
 {
 	Mail2Mailbox *m = [[[Mail2Mailbox alloc] init] autorelease];
@@ -51,7 +63,7 @@
 {
 	[date release]; [fromName release]; [fromAddr release]; [to release]; [cc release]; [replyTo release];
 	[subject release]; [messageId release]; [inReplyTo release]; [references release]; [snippet release]; [file release];
-	[thread release];
+	[thread release]; [outboxId release];
 	[super dealloc];
 }
 - (long long) rowid { return rowid; }
@@ -78,6 +90,7 @@
 - (int) threadCount { return threadCount > 0 ? threadCount : 1; }
 - (int) threadUnread { return threadUnread; }
 - (BOOL) isDraft { return (flags & Mail2FlagDraft) != 0; }
+- (NSString *) outboxId { return outboxId; }
 @end
 
 static NSString *

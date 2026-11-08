@@ -11,6 +11,7 @@
 #import "Mail2OAuth.h"
 #import "Mail2Rules.h"
 #import "Mail2RichText.h"
+#import "Mail2Outbox.h"
 #include <mbedtls/sha256.h>
 #include "Mail2TLS.h"
 #include <libetpan/mailstream.h>
@@ -815,6 +816,48 @@ main(void)
 		    [[rp attachments] count] == 1, "read back: the HTML, its picture inline, the file attached");
 		Mail2ParsedMessage *rp2 = [Mail2ParsedMessage parseData: raw preferPlainText: YES];
 		CHECK([[rp2 body] hasPrefix: @"Hello <world> & bold"], "and the plain part for plain readers");
+	}
+
+	printf("Outbox\n");
+	{
+		Mail2Session *os1 = [[Mail2Session alloc] initWithAccount: a2];
+		Mail2Account *broken = account(@"broken@localhost", @"x");
+		[broken setSmtpPort: 1];	/* nothing listens there */
+		Mail2Session *osb = [[Mail2Session alloc] initWithAccount: broken];
+		Mail2Outbox *ob = [Mail2Outbox shared];
+		[ob setSessionLookup: ^id (NSString *ident) {
+			return [ident isEqualToString: @"broken@localhost"] ? osb : os1;
+		}];
+		NSData *m1 = Mail2BuildMessage(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, @"outbox later", @"x", nil, nil);
+		NSString *later = [ob add: m1 details: [NSDictionary dictionaryWithObjectsAndKeys: @"test2@localhost", @"Account",
+		    [NSArray arrayWithObject: @"test1@localhost"], @"Recipients", [NSDate dateWithTimeIntervalSinceNow: 3600], @"SendAt",
+		    [NSNumber numberWithBool: YES], @"Undoable", @"outbox later", @"Subject", nil]];
+		NSString *path = [[Mail2SupportDirectory() stringByAppendingPathComponent: @"Outbox"] stringByAppendingPathComponent:
+		    [later stringByAppendingPathExtension: @"eml"]];
+		CHECK(later != nil && [[NSFileManager defaultManager] fileExistsAtPath: path], "queued on disk for later");
+		NSDictionary *back = [ob takeBack: later];
+		CHECK(back != nil && [[back objectForKey: @"Message"] isEqualToData: m1] && ![[NSFileManager defaultManager] fileExistsAtPath: path] &&
+		    [[ob items] count] == 0, "Undo Send takes it back, files and all");
+		NSData *m2 = Mail2BuildMessage(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, @"outbox now zebu", @"x", nil, nil);
+		[ob add: m2 details: [NSDictionary dictionaryWithObjectsAndKeys: @"test2@localhost", @"Account",
+		    [NSArray arrayWithObject: @"test1@localhost"], @"Recipients", nil]];
+		BOOL gone = wait_for(^BOOL { return [[ob items] count] == 0; }, 20);
+		BOOL arrived = wait_for(^BOOL {
+			NSString *e3 = nil;
+			[imap select: @"INBOX" uidValidity: NULL uidNext: NULL exists: NULL error: &e3];
+			return [[imap uidsMatchingText: @"zebu" error: &e3] count] == 1;
+		}, 20);
+		CHECK(gone && arrived, "due: sent, and gone from the Outbox");
+		NSData *m3 = Mail2BuildMessage(@"broken@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, @"no network", @"x", nil, nil);
+		NSString *bad = [ob add: m3 details: [NSDictionary dictionaryWithObjectsAndKeys: @"broken@localhost", @"Account",
+		    [NSArray arrayWithObject: @"test1@localhost"], @"Recipients", nil]];
+		BOOL failed = wait_for(^BOOL { return [[ob itemFor: bad] objectForKey: @"Error"] != nil; }, 30);
+		NSDictionary *bi = [ob itemFor: bad];
+		CHECK(failed && [[bi objectForKey: @"Attempts"] intValue] == 1 && [[bi objectForKey: @"NextTry"] timeIntervalSinceNow] > 20,
+		    "a failure stays, with its reason, to be tried again: %@", [bi objectForKey: @"Error"]);
+		[ob takeBack: bad];
+		[os1 release];
+		[osb release];
 	}
 
 	printf("\n%d checks, %d failed\n", checks, failures);

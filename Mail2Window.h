@@ -29,6 +29,9 @@
 	NSMutableSet *childRows;	/* rowids of its messages shown under it */
 	BOOL loadingOlder;
 	NSUndoManager *undo;		/* moves (Archive, Delete, Junk, Move To, drops) */
+	NSView *undoBar;		/* Undo Send */
+	NSTextField *undoLabel;
+	NSScrollView *sidebarScroll;
 }
 - (id) initWithSessions: (NSArray *)s;
 - (void) setSessions: (NSArray *)s;
@@ -51,6 +54,9 @@
 - (void) markJunk: (id)sender;
 - (void) applyRules: (id)sender;
 - (void) showSource: (id)sender;
+- (void) sendNow: (id)sender;
+- (void) undoSend: (id)sender;
+- (void) outboxChanged: (NSNotification *)n;
 - (void) newMailbox: (id)sender;
 - (void) renameMailbox: (id)sender;
 - (void) deleteMailbox: (id)sender;

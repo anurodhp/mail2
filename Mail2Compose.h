@@ -33,6 +33,7 @@
 	NSString *insertedSig;		/* the signature block put in the body, to swap when From changes */
 	NSMutableDictionary *lastLengths;	/* per address field: its length at the last change */
 	BOOL sending, saving, dirty, closeAfterSave, sent;
+	BOOL rich;			/* the body is rich text (sent as HTML when it has formatting) */
 }
 + (Mail2Compose *) newMessageWithSessions: (NSArray *)sessions to: (NSString *)to;
 /* from a mailto: URL, with its cc, bcc, subject and body */
@@ -46,5 +47,15 @@
 - (NSWindow *) window;
 - (void) attachFile: (id)sender;
 - (void) attachPaths: (NSArray *)paths;
+- (void) sendLater: (id)sender;
+/* the Outbox's item (Mail2Outbox -takeBack:) in a compose window again */
++ (Mail2Compose *) reopenOutgoing: (NSDictionary *)item sessions: (NSArray *)sessions;
+/* Format */
+- (void) addLink: (id)sender;
+- (void) toggleBulletList: (id)sender;
+- (void) toggleNumberedList: (id)sender;
+- (void) increaseQuoteLevel: (id)sender;
+- (void) decreaseQuoteLevel: (id)sender;
+- (void) togglePlainText: (id)sender;
 - (void) saveDraft: (id)sender;		/* also every minute while there are unsaved changes */
 @end

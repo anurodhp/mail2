@@ -18,6 +18,8 @@ enum {
 #define Mail2AllInboxesID (-1LL)
 /* and for every flagged message of every account (not in Trash or Junk): the Flagged smart mailbox */
 #define Mail2FlaggedID (-2LL)
+/* the Outbox (Mail2Outbox): messages waiting to go, which are not in the index */
+#define Mail2OutboxID (-3LL)
 
 @interface Mail2Mailbox : NSObject
 {
@@ -39,7 +41,8 @@ enum {
 - (int) unread;
 - (int) depth;			/* nesting level below its account */
 + (Mail2Mailbox *) allInboxes;	/* the viewer's All Inboxes, unread counted across the accounts */
-+ (Mail2Mailbox *) flagged;	/* the Flagged smart mailbox, its count the flagged messages */
++ (Mail2Mailbox *) flagged;
++ (Mail2Mailbox *) outbox: (int)count;	/* the Flagged smart mailbox, its count the flagged messages */
 - (BOOL) isVirtual;		/* All Inboxes or Flagged: messages of several mailboxes, no account of its own */
 @end
 
@@ -51,7 +54,7 @@ enum {
 	int flags;
 	NSDate *date;
 	NSString *fromName, *fromAddr, *to, *cc, *replyTo, *subject, *messageId, *inReplyTo, *references, *snippet, *file;
-	NSString *thread;
+	NSString *thread, *outboxId;
 	unsigned long long size;
 	BOOL attachment;
 	int threadCount, threadUnread;
@@ -80,6 +83,7 @@ enum {
 - (int) threadCount;		/* in a conversation list: the messages in it here (1 otherwise) */
 - (int) threadUnread;		/* and how many of them are unread */
 - (BOOL) isDraft;
+- (NSString *) outboxId;	/* an Outbox item's id (the row is not in the index), else nil */
 @end
 
 @interface Mail2Store : NSObject

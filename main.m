@@ -13,6 +13,7 @@
 #import "Mail2Account.h"
 #import "Mail2AccountPanel.h"
 #import "Mail2RulesWindow.h"
+#import "Mail2Outbox.h"
 #import "Mail2Compose.h"
 #import "Mail2Session.h"
 #import "Mail2Store.h"
@@ -276,6 +277,7 @@ static NSString *volatile heartbeatMode;
 - (void) moveTo: (id)s { [viewer moveTo: s]; }
 - (void) applyRules: (id)s { [viewer applyRules: s]; }
 - (void) showSource: (id)s { [viewer showSource: s]; }
+- (void) sendNow: (id)s { [viewer sendNow: s]; }
 
 - (void) showRules: (id)sender
 {
@@ -323,6 +325,7 @@ static NSString *volatile heartbeatMode;
 	add_item(m, @"Viewer Window", @selector(showViewer:), @"0", self);
 	add_item(m, @"Attach File…", @selector(attachFile:), nil, nil);		/* to the compose window in front */
 	add_item(m, @"Save as Draft", @selector(saveDraft:), @"s", nil);
+	add_item(m, @"Send Later…", @selector(sendLater:), nil, nil);
 	add_item(m, @"Close Window", @selector(performClose:), @"w", nil);
 	[main setSubmenu: m forItem: add_item(main, @"File", NULL, nil, nil)]; [m release];
 
@@ -335,6 +338,27 @@ static NSString *volatile heartbeatMode;
 	add_item(m, @"Select All", @selector(selectAll:), @"a", nil);
 	add_item(m, @"Find…", @selector(focusSearch:), @"f", self);
 	[main setSubmenu: m forItem: add_item(main, @"Edit", NULL, nil, nil)]; [m release];
+
+	/* Format: for the compose window in front (its text view and the font manager) */
+	m = [[NSMenu alloc] initWithTitle: @"Format"];
+	it = add_item(m, @"Bold", @selector(addFontTrait:), @"b", [NSFontManager sharedFontManager]);
+	[it setTag: NSBoldFontMask];
+	it = add_item(m, @"Italic", @selector(addFontTrait:), @"i", [NSFontManager sharedFontManager]);
+	[it setTag: NSItalicFontMask];
+	add_item(m, @"Underline", @selector(underline:), @"u", nil);
+	it = add_item(m, @"Bigger", @selector(modifyFont:), @"+", [NSFontManager sharedFontManager]);
+	[it setTag: NSSizeUpFontAction];
+	it = add_item(m, @"Smaller", @selector(modifyFont:), @"-", [NSFontManager sharedFontManager]);
+	[it setTag: NSSizeDownFontAction];
+	[m addItem: [NSMenuItem separatorItem]];
+	add_item(m, @"Add Link…", @selector(addLink:), @"k", nil);
+	add_item(m, @"Bulleted List", @selector(toggleBulletList:), @"7", nil);
+	add_item(m, @"Numbered List", @selector(toggleNumberedList:), @"8", nil);
+	add_item(m, @"Increase Quote Level", @selector(increaseQuoteLevel:), @"'", nil);
+	add_item(m, @"Decrease Quote Level", @selector(decreaseQuoteLevel:), @"\"", nil);
+	[m addItem: [NSMenuItem separatorItem]];
+	add_item(m, @"Make Plain Text", @selector(togglePlainText:), @"T", nil);
+	[main setSubmenu: m forItem: add_item(main, @"Format", NULL, nil, nil)]; [m release];
 
 	m = [[NSMenu alloc] initWithTitle: @"View"];
 	add_item(m, @"Organize by Conversation", @selector(toggleConversations:), nil, self);
@@ -359,7 +383,8 @@ static NSString *volatile heartbeatMode;
 	add_item(m, @"Move To…", @selector(moveTo:), @"M", self);
 	add_item(m, @"Mark as Junk", @selector(markJunk:), @"J", self);
 	add_item(m, @"Apply Rules", @selector(applyRules:), nil, self);
-	add_item(m, @"Show Raw Source", @selector(showSource:), @"u", self);
+	add_item(m, @"Show Raw Source", @selector(showSource:), nil, self);
+	add_item(m, @"Send Now", @selector(sendNow:), nil, self);
 	add_item(m, @"Mark as Read/Unread", @selector(toggleRead:), @"U", self);
 	add_item(m, @"Flag/Unflag", @selector(toggleFlag:), @"L", self);
 	[main setSubmenu: m forItem: add_item(main, @"Message", NULL, nil, nil)]; [m release];
@@ -390,6 +415,16 @@ static NSString *volatile heartbeatMode;
 		return;
 	}
 	[self startSessions];
+	/* the Outbox sends through the sessions; what an earlier run left goes now */
+	[[Mail2Outbox shared] setSessionLookup: ^id (NSString *ident) {
+		NSEnumerator *e = [sessions objectEnumerator];
+		Mail2Session *s;
+		while ((s = [e nextObject]) != nil)
+			if ([[[s account] identifier] isEqualToString: ident])
+				return s;
+		return nil;
+	}];
+	[viewer outboxChanged: nil];
 	if ([accounts count] == 0)
 		[self addAccount: nil];
 	NSString *to = mailto_argument();

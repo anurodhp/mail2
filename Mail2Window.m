@@ -2,6 +2,7 @@
 #import "Mail2Window.h"
 #import "Mail2Compose.h"
 #import "Mail2Util.h"
+#import "Mail2Outbox.h"
 #include <dispatch/dispatch.h>
 
 #define BAR_H 44.0
@@ -156,6 +157,26 @@ scroller_for(NSTableView *t, NSRect r)
 	sidebarCell = [[Mail2SidebarCell alloc] initTextCell: @""];
 	sidebar = [self makeTable: sidebarCell rowHeight: 26 sidebar: YES];
 	NSScrollView *ss = scroller_for(sidebar, NSMakeRect(0, STATUS_H, SIDEBAR_W, h - STATUS_H));
+	sidebarScroll = [ss retain];
+	/* Undo Send: over the status line while a message waits its few seconds */
+	undoBar = [[NSView alloc] initWithFrame: NSMakeRect(0, STATUS_H, SIDEBAR_W, 32)];
+	[undoBar setAutoresizingMask: NSViewWidthSizable | NSViewMaxYMargin];
+	undoLabel = [[NSTextField alloc] initWithFrame: NSMakeRect(10, 7, SIDEBAR_W - 90, 18)];
+	[undoLabel setEditable: NO];
+	[undoLabel setSelectable: NO];
+	[undoLabel setBezeled: NO];
+	[undoLabel setDrawsBackground: NO];
+	[undoLabel setFont: [NSFont systemFontOfSize: 11]];
+	[undoLabel setStringValue: @"Sending…"];
+	[undoBar addSubview: undoLabel];
+	NSButton *ub = [[[NSButton alloc] initWithFrame: NSMakeRect(SIDEBAR_W - 76, 3, 68, 26)] autorelease];
+	[ub setTitle: @"Undo"];
+	[ub setBezelStyle: NSRoundedBezelStyle];
+	[ub setTarget: self];
+	[ub setAction: @selector(undoSend:)];
+	[ub setAutoresizingMask: NSViewMinXMargin];
+	[undoBar addSubview: ub];
+	[undoBar setHidden: YES];
 	[ss setDrawsBackground: NO];
 	[sp addSubview: ss];
 	statusField = [[NSTextField alloc] initWithFrame: NSMakeRect(10, 2, SIDEBAR_W - 16, STATUS_H - 4)];
@@ -167,6 +188,7 @@ scroller_for(NSTableView *t, NSRect r)
 	[statusField setTextColor: [NSColor colorWithCalibratedWhite: 0.40 alpha: 1]];
 	[statusField setAutoresizingMask: NSViewWidthSizable | NSViewMaxYMargin];
 	[sp addSubview: statusField];
+	[sp addSubview: undoBar];
 
 	/* pane 2: messages */
 	messageCell = [[Mail2MessageCell alloc] initTextCell: @""];
@@ -191,6 +213,7 @@ scroller_for(NSTableView *t, NSRect r)
 	[nc addObserver: self selector: @selector(mailboxesChanged:) name: Mail2MailboxesChanged object: nil];
 	[nc addObserver: self selector: @selector(messagesChanged:) name: Mail2MessagesChanged object: nil];
 	[nc addObserver: self selector: @selector(statusChanged:) name: Mail2StatusChanged object: nil];
+	[nc addObserver: self selector: @selector(outboxChanged:) name: Mail2OutboxChanged object: nil];
 
 	[self reloadSidebar];
 	[self updateButtons];
@@ -207,7 +230,7 @@ scroller_for(NSTableView *t, NSRect r)
 	[sidebarCell release]; [messageCell release]; [messageView release]; [statusField release]; [buttons release];
 	[current release]; [messages release]; [parsed release];
 	[searchField release]; [searchText release]; [serverHits release]; [expanded release]; [childRows release];
-	[undo release];
+	[undo release]; [undoBar release]; [undoLabel release]; [sidebarScroll release];
 	[super dealloc];
 }
 
@@ -320,6 +343,10 @@ scroller_for(NSTableView *t, NSRect r)
 	[sidebarItems removeAllObjects];
 	if ([sessions count] > 1)
 		[sidebarItems addObject: [Mail2Mailbox allInboxes]];
+	/* the Outbox, while something waits to go */
+	NSUInteger waiting = [[[Mail2Outbox shared] items] count];
+	if (waiting > 0 || [current mbid] == Mail2OutboxID)
+		[sidebarItems addObject: [Mail2Mailbox outbox: (int)waiting]];
 	/* Flagged, while there is something flagged (or it is the mailbox shown) */
 	Mail2Mailbox *fl = [Mail2Mailbox flagged];
 	if ([sessions count] > 0 && ([fl unread] > 0 || [current mbid] == Mail2FlaggedID))
@@ -408,6 +435,8 @@ scroller_for(NSTableView *t, NSRect r)
 	[childRows removeAllObjects];
 	if (current == nil)
 		return [NSArray array];
+	if ([current mbid] == Mail2OutboxID)
+		return [self outboxRows];
 	if (searchText != nil)
 		return [store searchMailbox: [current mbid] text: searchText alsoUids: serverHits limit: LIST_LIMIT];
 	if (![self showsConversations])
@@ -694,6 +723,12 @@ scroller_for(NSTableView *t, NSRect r)
 - (void) editDraft: (id)sender
 {
 	Mail2MessageInfo *m = [self selectedMessage];
+	if ([m outboxId]) {	/* back out of the Outbox, into a compose window */
+		NSDictionary *back = [[Mail2Outbox shared] takeBack: [m outboxId]];
+		if (back != nil)
+			[Mail2Compose reopenOutgoing: back sessions: sessions];
+		return;
+	}
 	if (m == nil || !([m isDraft] || [[current special] isEqualToString: @"drafts"]))
 		return;
 	if (parsed == nil || [[messageView message] rowid] != [m rowid])
@@ -778,6 +813,13 @@ scroller_for(NSTableView *t, NSRect r)
 		return;
 	}
 	Mail2MessageInfo *m = [sel objectAtIndex: 0];
+	if ([m outboxId]) {	/* waiting in the Outbox: its own file */
+		Mail2ParsedMessage *op = [Mail2ParsedMessage parseData: [[Mail2Outbox shared] messageFor: [m outboxId]] preferPlainText: NO];
+		ASSIGN(parsed, op);
+		[messageView showMessage: m body: [op body] attachments: [op attachments] html: [op htmlSource] inlineParts: [op inlineParts]];
+		[self updateButtons];
+		return;
+	}
 	Mail2Session *s = [self sessionForMessage: m];
 	if (Mail2Debug())
 		NSLog(@"Mail2: show message uid %u (%@)", [m uid], [m file] ? @"downloaded" : @"to download");
@@ -807,6 +849,17 @@ scroller_for(NSTableView *t, NSRect r)
 
 - (BOOL) validateAction: (SEL)a
 {
+	if ([current mbid] == Mail2OutboxID) {	/* only what makes sense for messages not sent yet */
+		if (a == @selector(deleteMessages:) || a == @selector(sendNow:) || a == @selector(showSource:))
+			return [[self selectedMessages] count] > 0;
+		if (a == @selector(editDraft:))
+			return [self selectedMessage] != nil;
+		if (a == @selector(getMail:) || a == @selector(compose:) || a == @selector(newMailbox:))
+			return [sessions count] > 0;
+		return NO;
+	}
+	if (a == @selector(sendNow:) || a == @selector(undoSend:))
+		return NO;
 	if (a == @selector(getMail:) || a == @selector(compose:))
 		return [sessions count] > 0;
 	if (a == @selector(reply:) || a == @selector(replyAll:) || a == @selector(forward:))
@@ -925,6 +978,90 @@ scroller_for(NSTableView *t, NSRect r)
 	[self showSelection];
 }
 
+/* ---- the Outbox ---- */
+
+/* its items as rows: To, Subject, when (or why not yet) */
+- (NSArray *) outboxRows
+{
+	NSMutableArray *r = [NSMutableArray array];
+	NSEnumerator *e = [[[Mail2Outbox shared] items] reverseObjectEnumerator];
+	NSDictionary *d;
+	long long n = 0;
+	while ((d = [e nextObject]) != nil) {
+		Mail2MessageInfo *m = [[[Mail2MessageInfo alloc] init] autorelease];
+		m->rowid = -(++n);
+		m->mbid = Mail2OutboxID;
+		m->flags = Mail2FlagSeen;
+		m->fromName = [[NSString stringWithFormat: @"To: %@", [d objectForKey: @"To"] ? [d objectForKey: @"To"] : @""] retain];
+		m->to = [[d objectForKey: @"To"] retain];
+		m->subject = [[d objectForKey: @"Subject"] retain];
+		m->date = [[d objectForKey: @"SendAt"] retain];
+		m->outboxId = [[d objectForKey: @"Id"] retain];
+		NSString *state;
+		if ([[Mail2Outbox shared] isSending: [d objectForKey: @"Id"]])
+			state = @"Sending now…";
+		else if ([d objectForKey: @"Error"])
+			state = [NSString stringWithFormat: @"Not sent yet: %@", [d objectForKey: @"Error"]];
+		else if ([[d objectForKey: @"SendAt"] timeIntervalSinceNow] > 60)
+			state = [NSString stringWithFormat: @"Sends %@", Mail2LongDate([d objectForKey: @"SendAt"])];
+		else
+			state = @"Sending…";
+		m->snippet = [state retain];
+		[r addObject: m];
+	}
+	return r;
+}
+
+- (void) outboxChanged: (NSNotification *)n
+{
+	NSArray *items = [[Mail2Outbox shared] items];
+	NSDictionary *undoable = nil;
+	NSEnumerator *e = [items objectEnumerator];
+	NSDictionary *d;
+	while ((d = [e nextObject]) != nil)
+		if ([d objectForKey: @"Undoable"])
+			undoable = d;
+	if (undoable)
+		[undoLabel setStringValue: [NSString stringWithFormat: @"Sending “%@”…", [undoable objectForKey: @"Subject"]]];
+	BOOL show = undoable != nil;
+	if ([undoBar isHidden] == show) {
+		[undoBar setHidden: !show];
+		NSRect f = [sidebarScroll frame], sb = [[sidebarScroll superview] bounds];
+		CGFloat bottom = STATUS_H + (show ? 32 : 0);
+		f.origin.y = bottom;
+		f.size.height = NSHeight(sb) - bottom;
+		[sidebarScroll setFrame: f];
+	}
+	[self reloadSidebar];
+	if ([current mbid] == Mail2OutboxID)
+		[self reloadMessages];
+}
+
+/* the newest message still in its Undo moment comes back to a compose window */
+- (void) undoSend: (id)sender
+{
+	NSString *ident = nil;
+	NSEnumerator *e = [[[Mail2Outbox shared] items] objectEnumerator];
+	NSDictionary *d;
+	while ((d = [e nextObject]) != nil)
+		if ([d objectForKey: @"Undoable"])
+			ident = [d objectForKey: @"Id"];
+	NSDictionary *back = ident ? [[Mail2Outbox shared] takeBack: ident] : nil;
+	if (back != nil)
+		[Mail2Compose reopenOutgoing: back sessions: sessions];
+	else if (ident != nil)
+		NSRunAlertPanel(@"Undo Send", @"Too late: the message is on its way.", @"OK", nil, nil);
+}
+
+- (void) sendNow: (id)sender
+{
+	NSEnumerator *e = [[self selectedMessages] objectEnumerator];
+	Mail2MessageInfo *m;
+	while ((m = [e nextObject]) != nil)
+		if ([m outboxId])
+			[[Mail2Outbox shared] sendNow: [m outboxId]];
+}
+
 /* ---- moves that Edit > Undo takes back ---- */
 
 - (NSUndoManager *) windowWillReturnUndoManager: (NSWindow *)w
@@ -1002,6 +1139,17 @@ scroller_for(NSTableView *t, NSRect r)
 
 - (void) deleteMessages: (id)sender
 {
+	if ([current mbid] == Mail2OutboxID) {	/* unsent: they never go */
+		NSArray *sel = [self selectedMessages];
+		if ([sel count] == 0 || NSRunAlertPanel(@"Delete Unsent Messages?", @"They will not be sent.", @"Delete", @"Cancel", nil)
+		    != NSAlertDefaultReturn)
+			return;
+		NSEnumerator *e = [sel objectEnumerator];
+		Mail2MessageInfo *m;
+		while ((m = [e nextObject]) != nil)
+			[[Mail2Outbox shared] takeBack: [m outboxId]];
+		return;
+	}
 	if ([[current special] isEqualToString: @"trash"] &&
 	    NSRunAlertPanel(@"Delete Permanently?", @"Messages deleted from the Trash cannot be recovered.",
 	        @"Delete", @"Cancel", nil) != NSAlertDefaultReturn)
@@ -1060,8 +1208,8 @@ scroller_for(NSTableView *t, NSRect r)
 - (void) showSource: (id)sender
 {
 	Mail2MessageInfo *m = [self selectedMessage];
-	NSString *path = m ? [[Mail2Store sharedStore] pathForMessage: m] : nil;
-	NSData *raw = path ? [NSData dataWithContentsOfFile: path] : nil;
+	NSString *path = m && ![m outboxId] ? [[Mail2Store sharedStore] pathForMessage: m] : nil;
+	NSData *raw = [m outboxId] ? [[Mail2Outbox shared] messageFor: [m outboxId]] : path ? [NSData dataWithContentsOfFile: path] : nil;
 	if (raw == nil) {
 		if (m != nil)
 			NSRunAlertPanel(@"Raw Source", @"The message is not downloaded yet: show it first.", @"OK", nil, nil);

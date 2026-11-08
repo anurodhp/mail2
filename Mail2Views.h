@@ -93,6 +93,8 @@ BOOL Mail2WebViewInstalled(void);	/* the library is there (and has not failed): 
 
 /* small modal questions: a name (nil if cancelled), and one of the mailboxes (nil if cancelled) */
 NSString *Mail2AskString(NSString *title, NSString *message, NSString *initial, NSString *okTitle);
+/* Send Later's question: in an hour, this evening, tomorrow morning, Monday morning, or a date typed; nil if cancelled */
+NSDate *Mail2ChooseSendTime(void);
 Mail2Mailbox *Mail2ChooseMailbox(NSString *title, NSString *message, NSArray *mailboxes, NSString *okTitle);
 
 /* quote levels coloured, the signature dimmed, links (NSLinkAttributeName) in a plain-text body */

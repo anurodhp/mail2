@@ -2,6 +2,10 @@
 #import "Mail2Compose.h"
 #import "Mail2Views.h"
 #import "Mail2Util.h"
+#import "Mail2RichText.h"
+#import "Mail2Outbox.h"
+#include <ctype.h>
+#include <math.h>
 
 static NSMutableSet *open_windows;	/* each compose window keeps itself alive until closed */
 
@@ -205,8 +209,12 @@ quote(NSString *body)
 	bodyView = [[Mail2BodyView alloc] initWithFrame: NSMakeRect(0, 0, cs.width, cs.height)];
 	[(Mail2BodyView *)bodyView setFileTarget: self];
 	[bodyView registerForDraggedTypes: [NSArray arrayWithObject: NSFilenamesPboardType]];
-	[bodyView setRichText: NO];
-	[bodyView setImportsGraphics: NO];
+	/* rich text unless the user prefers plain (Mail2ComposeRich NO, or Format > Make Plain Text) */
+	NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+	rich = [ud objectForKey: @"Mail2ComposeRich"] == nil || [ud boolForKey: @"Mail2ComposeRich"];
+	[bodyView setRichText: rich];
+	[bodyView setImportsGraphics: rich];
+	[bodyView setTypingAttributes: [NSDictionary dictionaryWithObject: [NSFont systemFontOfSize: 13] forKey: NSFontAttributeName]];
 	[bodyView setFont: [NSFont systemFontOfSize: 13]];
 	[bodyView setTextContainerInset: NSMakeSize(12, 10)];
 	[bodyView setMinSize: NSMakeSize(0, cs.height)];
@@ -459,6 +467,9 @@ signature_block(Mail2Session *s)
 			continue;
 		}
 		total += [d length];
+		if (rich && [Mail2MimeTypeForFilename(path) hasPrefix: @"image/"] && [d length] <= 10 * 1024 * 1024 &&
+		    [self insertPicture: d named: [path lastPathComponent]])
+			continue;
 		[attachments addObject: [[[Mail2Attachment alloc] initWithName: [path lastPathComponent]
 		    type: Mail2MimeTypeForFilename(path) data: d] autorelease]];
 		[[NSUserDefaults standardUserDefaults] setObject: [path stringByDeletingLastPathComponent] forKey: @"Mail2AttachDirectory"];
@@ -502,6 +513,229 @@ signature_block(Mail2Session *s)
 	}
 }
 
+/* ---- the message ---- */
+
+/* the body as it goes out: plain text, or plain text and HTML with its pictures when there is formatting */
+- (NSData *) buildFrom: (NSString *)from to: (NSArray *)to cc: (NSArray *)cc bcc: (NSArray *)bcc messageId: (NSString *)mid
+{
+	NSTextStorage *ts = [bodyView textStorage];
+	if (rich && Mail2RichTextHasFormatting(ts, [NSFont systemFontOfSize: 13])) {
+		NSMutableArray *imgs = [NSMutableArray array];
+		NSString *plain = nil;
+		NSString *html = Mail2HTMLFromRichText(ts, imgs, &plain);
+		return Mail2BuildMessageRich(from, to, cc, bcc, [subjectField stringValue], plain, html, imgs, inReplyTo, references,
+		    attachments, mid);
+	}
+	return Mail2BuildMessageEx(from, to, cc, bcc, [subjectField stringValue], [bodyView string], inReplyTo, references,
+	    attachments, mid);
+}
+
+/* drafts keep their formatting here (RTFD by Message-ID): the server's copy is HTML, which this window cannot read back */
+static NSString *
+rtfd_path(NSString *mid)
+{
+	NSMutableString *n = [NSMutableString string];
+	NSUInteger i;
+	for (i = 0; i < [mid length]; i++) {
+		unichar c = [mid characterAtIndex: i];
+		[n appendFormat: @"%C", (unichar)(isalnum(c) || c == '.' || c == '-' ? c : '_')];
+	}
+	NSString *dir = [Mail2SupportDirectory() stringByAppendingPathComponent: @"DraftText"];
+	[[NSFileManager defaultManager] createDirectoryAtPath: dir withIntermediateDirectories: YES attributes: nil error: NULL];
+	return [dir stringByAppendingPathComponent: [n stringByAppendingPathExtension: @"rtfd"]];
+}
+
+- (void) keepRichDraft: (NSString *)mid replacing: (NSString *)old
+{
+	if (old != nil)
+		[[NSFileManager defaultManager] removeItemAtPath: rtfd_path(old) error: NULL];
+	NSTextStorage *ts = [bodyView textStorage];
+	if (!rich || !Mail2RichTextHasFormatting(ts, [NSFont systemFontOfSize: 13]))
+		return;
+	NSData *d = [ts RTFDFromRange: NSMakeRange(0, [ts length]) documentAttributes: [NSDictionary dictionary]];
+	[d writeToFile: rtfd_path(mid) atomically: YES];
+}
+
+/* ---- Format ---- */
+
+- (void) addLink: (id)sender
+{
+	NSRange sel = [bodyView selectedRange];
+	NSString *u = Mail2AskString(@"Add Link", @"Link to (a web address):", @"https://", @"Add");
+	if (u == nil || [u isEqualToString: @"https://"])
+		return;
+	if ([u rangeOfString: @":"].location == NSNotFound)
+		u = [@"https://" stringByAppendingString: u];
+	NSTextStorage *ts = [bodyView textStorage];
+	if (sel.length == 0) {	/* nothing selected: the address itself, linked */
+		NSDictionary *ta = [bodyView typingAttributes];
+		[ts replaceCharactersInRange: sel withAttributedString: [[[NSAttributedString alloc] initWithString: u attributes: ta] autorelease]];
+		sel = NSMakeRange(sel.location, [u length]);
+	}
+	[ts addAttribute: NSLinkAttributeName value: u range: sel];
+	[self setDirty: YES];
+}
+
+/* the paragraphs touched by the selection, last first (so that edits do not move the next ones) */
+- (NSArray *) selectedParagraphStarts
+{
+	NSString *t = [bodyView string];
+	NSRange sel = [bodyView selectedRange];
+	NSRange para = [t paragraphRangeForRange: sel];
+	NSMutableArray *starts = [NSMutableArray array];
+	NSUInteger i = para.location;
+	while (i < NSMaxRange(para) || (i == para.location && [starts count] == 0)) {
+		[starts insertObject: [NSNumber numberWithUnsignedInteger: i] atIndex: 0];
+		NSRange r = [t paragraphRangeForRange: NSMakeRange(i, 0)];
+		if (NSMaxRange(r) <= i)
+			break;
+		i = NSMaxRange(r);
+	}
+	return starts;
+}
+
+- (void) prefixParagraphs: (NSString *(^)(NSString *line, NSUInteger index, NSUInteger count))change
+{
+	NSTextStorage *ts = [bodyView textStorage];
+	NSArray *starts = [self selectedParagraphStarts];
+	NSUInteger n = [starts count], k = 0;
+	[ts beginEditing];
+	NSEnumerator *e = [starts objectEnumerator];
+	NSNumber *st;
+	while ((st = [e nextObject]) != nil) {
+		NSRange r = [[ts string] paragraphRangeForRange: NSMakeRange([st unsignedIntegerValue], 0)];
+		NSString *line = [[ts string] substringWithRange: r];
+		NSString *now = change(line, n - 1 - k, n);
+		k++;
+		if (now == nil || [now isEqualToString: line])
+			continue;
+		/* only the start of the line changes: its formatting stays */
+		NSUInteger common = 0;
+		while (common < [line length] && common < [now length] && [line characterAtIndex: [line length] - 1 - common] ==
+		    [now characterAtIndex: [now length] - 1 - common])
+			common++;
+		NSRange head = NSMakeRange(r.location, [line length] - common);
+		NSDictionary *at = [ts length] ? [ts attributesAtIndex: MIN(r.location, [ts length] - 1) effectiveRange: NULL]
+		    : [bodyView typingAttributes];
+		[ts replaceCharactersInRange: head withAttributedString: [[[NSAttributedString alloc] initWithString:
+		    [now substringToIndex: [now length] - common] attributes: at] autorelease]];
+	}
+	[ts endEditing];
+	[self setDirty: YES];
+}
+
+static NSString *
+strip_list(NSString *l)
+{
+	if ([l hasPrefix: @"• "])
+		return [l substringFromIndex: 2];
+	NSUInteger i = 0;
+	while (i < [l length] && isdigit([l characterAtIndex: i]))
+		i++;
+	if (i > 0 && i + 1 < [l length] && [l characterAtIndex: i] == '.' && [l characterAtIndex: i + 1] == ' ')
+		return [l substringFromIndex: i + 2];
+	return l;
+}
+
+- (void) toggleBulletList: (id)sender
+{
+	NSString *first = [[bodyView string] substringWithRange: [[bodyView string] paragraphRangeForRange: [bodyView selectedRange]]];
+	BOOL off = [first hasPrefix: @"• "];
+	[self prefixParagraphs: ^NSString *(NSString *l, NSUInteger i, NSUInteger n) {
+		return off ? strip_list(l) : [@"• " stringByAppendingString: strip_list(l)];
+	}];
+}
+
+- (void) toggleNumberedList: (id)sender
+{
+	NSString *first = [[bodyView string] substringWithRange: [[bodyView string] paragraphRangeForRange: [bodyView selectedRange]]];
+	BOOL off = [first length] > 2 && isdigit([first characterAtIndex: 0]) && [strip_list(first) length] < [first length];
+	[self prefixParagraphs: ^NSString *(NSString *l, NSUInteger i, NSUInteger n) {
+		return off ? strip_list(l) : [NSString stringWithFormat: @"%lu. %@", (unsigned long)(i + 1), strip_list(l)];
+	}];
+}
+
+- (void) increaseQuoteLevel: (id)sender
+{
+	[self prefixParagraphs: ^NSString *(NSString *l, NSUInteger i, NSUInteger n) {
+		return [l hasPrefix: @">"] ? [@">" stringByAppendingString: l] : [@"> " stringByAppendingString: l];
+	}];
+}
+
+- (void) decreaseQuoteLevel: (id)sender
+{
+	[self prefixParagraphs: ^NSString *(NSString *l, NSUInteger i, NSUInteger n) {
+		if ([l hasPrefix: @"> "]) return [l substringFromIndex: 2];
+		if ([l hasPrefix: @">"]) return [l substringFromIndex: 1];
+		return l;
+	}];
+}
+
+/* plain: formatting goes, pictures become attached files; rich: the formatting tools come back */
+- (void) togglePlainText: (id)sender
+{
+	NSTextStorage *ts = [bodyView textStorage];
+	if (rich) {
+		if (Mail2RichTextHasFormatting(ts, [NSFont systemFontOfSize: 13]) &&
+		    NSRunAlertPanel(@"Make Plain Text?", @"The formatting goes; pictures in the text become attachments.",
+		        @"Make Plain Text", @"Cancel", nil) != NSAlertDefaultReturn)
+			return;
+		NSMutableArray *imgs = [NSMutableArray array];
+		NSString *plain = nil;
+		Mail2HTMLFromRichText(ts, imgs, &plain);
+		NSEnumerator *e = [imgs objectEnumerator];
+		Mail2Attachment *a;
+		while ((a = [e nextObject]) != nil) {
+			[a setContentId: nil];
+			[attachments addObject: a];
+		}
+		rich = NO;
+		[bodyView setRichText: NO];
+		[bodyView setImportsGraphics: NO];
+		[bodyView setString: plain ? plain : @""];
+		[bodyView setFont: [NSFont systemFontOfSize: 13]];
+		[self layoutAttachments];
+	} else {
+		rich = YES;
+		[bodyView setRichText: YES];
+		[bodyView setImportsGraphics: YES];
+	}
+	[self setDirty: YES];
+}
+
+- (BOOL) validateMenuItem: (NSMenuItem *)item
+{
+	SEL a = [item action];
+	if (a == @selector(togglePlainText:))
+		[item setTitle: rich ? @"Make Plain Text" : @"Make Rich Text"];
+	if (a == @selector(addLink:) || a == @selector(toggleBulletList:) || a == @selector(toggleNumberedList:))
+		return rich || a != @selector(addLink:);
+	return YES;
+}
+
+/* a picture file dropped or attached in rich text goes into the text, where the caret is */
+- (BOOL) insertPicture: (NSData *)d named: (NSString *)name
+{
+	NSImage *img = [[[NSImage alloc] initWithData: d] autorelease];
+	if (img == nil || [img size].width < 1)
+		return NO;
+	NSSize sz = [img size];
+	CGFloat maxW = MAX(100, NSWidth([bodyView frame]) - 40);
+	if (sz.width > maxW) {
+		[img setScalingAllowed: YES];
+		[img setSize: NSMakeSize(maxW, floor(sz.height * maxW / sz.width))];
+	}
+	NSFileWrapper *fw = [[[NSFileWrapper alloc] initRegularFileWithContents: d] autorelease];
+	[fw setPreferredFilename: name];
+	NSTextAttachment *ta = [[[NSTextAttachment alloc] initWithFileWrapper: fw] autorelease];
+	NSTextAttachmentCell *cell = [[[NSTextAttachmentCell alloc] initImageCell: img] autorelease];
+	[ta setAttachmentCell: cell];
+	NSRange sel = [bodyView selectedRange];
+	[[bodyView textStorage] replaceCharactersInRange: sel withAttributedString: [NSAttributedString attributedStringWithAttachment: ta]];
+	[bodyView setSelectedRange: NSMakeRange(sel.location + 1, 0)];
+	return YES;
+}
+
 - (BOOL) hasContent
 {
 	return [[toField stringValue] length] + [[ccField stringValue] length] + [[bccField stringValue] length] +
@@ -516,12 +750,10 @@ signature_block(Mail2Session *s)
 	Mail2Session *s = [self fromSession];
 	NSString *mid = Mail2NewMessageID([[s account] email]);
 	/* addresses that cannot be read yet are kept as they were typed: the draft is not sent */
-	NSData *raw = Mail2BuildMessageEx([self fromLine], Mail2SplitAddresses([toField stringValue]),
-	    Mail2SplitAddresses([ccField stringValue]), Mail2SplitAddresses([bccField stringValue]), [subjectField stringValue],
-	    [bodyView string], inReplyTo, references, attachments, mid);
+	NSData *raw = [self buildFrom: [self fromLine] to: Mail2SplitAddresses([toField stringValue])
+	    cc: Mail2SplitAddresses([ccField stringValue]) bcc: Mail2SplitAddresses([bccField stringValue]) messageId: mid];
 	if (raw == nil)
-		raw = Mail2BuildMessageEx([self fromLine], nil, nil, nil, [subjectField stringValue],
-		    [bodyView string], inReplyTo, references, attachments, mid);
+		raw = [self buildFrom: [self fromLine] to: nil cc: nil bcc: nil messageId: mid];
 	if (raw == nil) {
 		if (!quiet)
 			NSRunAlertPanel(@"Cannot Save", @"The draft could not be written.", @"OK", nil, nil);
@@ -542,6 +774,7 @@ signature_block(Mail2Session *s)
 		}
 		[window setTitle: [self plainTitle]];
 		if (err == nil) {
+			[self keepRichDraft: mid replacing: draftId];
 			ASSIGN(draftId, mid);
 			if (closeAfterSave) {
 				closeAfterSave = NO;
@@ -578,7 +811,14 @@ signature_block(Mail2Session *s)
 	[c->bccField setStringValue: [p bcc] ? [p bcc] : @""];
 	[c->subjectField setStringValue: [m subject] ? [m subject] : @""];
 	[c->window setTitle: [c plainTitle]];
-	[c->bodyView setString: [p body] ? [p body] : @""];
+	/* the draft's formatting, when this machine kept it */
+	NSString *mid = [p messageId] ? [p messageId] : [m messageId];
+	NSData *rtfd = mid ? [NSData dataWithContentsOfFile: rtfd_path(mid)] : nil;
+	NSAttributedString *kept = rtfd ? [[[NSAttributedString alloc] initWithRTFD: rtfd documentAttributes: NULL] autorelease] : nil;
+	if (kept != nil && c->rich)
+		[[c->bodyView textStorage] setAttributedString: kept];
+	else
+		[c->bodyView setString: [p body] ? [p body] : @""];
 	[c->attachments addObjectsFromArray: [p attachments]];
 	ASSIGN(c->inReplyTo, [p inReplyTo]);
 	ASSIGN(c->references, [p references]);
@@ -698,7 +938,9 @@ own_address_filter(NSArray *addrs, NSString *mine, NSMutableSet *seen)
 	return c;
 }
 
-- (void) send: (id)sender
+/* Send and Send Later: the message goes to the Outbox (Mail2Outbox.h), which sends it when it is due -- after the Undo
+ * Send moment (Mail2UndoSendDelay seconds, 5) or at the time chosen -- and keeps trying while the network is away */
+- (void) queueAt: (NSDate *)when undoable: (BOOL)undoable
 {
 	if (sending)
 		return;
@@ -714,8 +956,8 @@ own_address_filter(NSArray *addrs, NSString *mine, NSMutableSet *seen)
 	    NSRunAlertPanel(@"No Subject", @"Send this message without a subject?", @"Send", @"Cancel", nil) != NSAlertDefaultReturn)
 		return;
 	Mail2Session *s = [self fromSession];
-	NSData *raw = Mail2BuildMessageEx([self fromLine], to, cc, nil, [subjectField stringValue], [bodyView string],
-	    inReplyTo, references, attachments, nil);
+	NSString *mid = Mail2NewMessageID([[s account] email]);
+	NSData *raw = [self buildFrom: [self fromLine] to: to cc: cc bcc: nil messageId: mid];
 	if (raw == nil) {
 		NSRunAlertPanel(@"Cannot Send", @"One of the addresses could not be read. Check To, Cc and Bcc.", @"OK", nil, nil);
 		return;
@@ -725,26 +967,81 @@ own_address_filter(NSArray *addrs, NSString *mine, NSMutableSet *seen)
 	NSString *a;
 	while ((a = [e nextObject]) != nil)
 		[rcpts addObject: Mail2AddressPart(a)];
+	NSMutableDictionary *d = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+	    [[s account] identifier], @"Account", rcpts, @"Recipients", when, @"SendAt", mid, @"MessageId",
+	    [subjectField stringValue], @"Subject", [toField stringValue], @"To", [ccField stringValue], @"Cc",
+	    [bccField stringValue], @"Bcc", [self fromLine], @"From", nil];
+	if (undoable)
+		[d setObject: [NSNumber numberWithBool: YES] forKey: @"Undoable"];
+	if (draftId)
+		[d setObject: draftId forKey: @"Draft"];
+	if (original)
+		[d setObject: [NSNumber numberWithLongLong: [original rowid]] forKey: @"ReplyTo"];
+	/* its formatting, for Undo or an edit from the Outbox */
+	[self keepRichDraft: mid replacing: nil];
+	if ([[Mail2Outbox shared] add: raw details: d] == nil) {
+		NSRunAlertPanel(@"Cannot Send", @"The message could not be put in the Outbox (is the disk full?).", @"OK", nil, nil);
+		return;
+	}
+	sent = YES;
+	[self setDirty: NO];
+	if (!saving)
+		[window close];
+}
 
-	sending = YES;
-	[sendButton setEnabled: NO];
-	[window setTitle: [NSString stringWithFormat: @"Sending: %@", [subjectField stringValue]]];
-	[self retain];
-	[s sendMessage: raw recipients: rcpts replyingTo: original completion: ^(NSString *err) {
-		sending = NO;
-		[sendButton setEnabled: YES];
-		if (err == nil) {
-			sent = YES;
-			[s deleteDraft: draftId];	/* sent: the draft has done its job (one still being saved goes when it lands) */
-			[self setDirty: NO];
-			if (!saving)
-				[window close];
-		} else {
-			[window setTitle: [self plainTitle]];
-			NSRunAlertPanel(@"The Message Was Not Sent", @"%@", @"OK", nil, nil, err);
-		}
-		[self release];
-	}];
+- (void) send: (id)sender
+{
+	NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+	NSTimeInterval delay = [ud objectForKey: @"Mail2UndoSendDelay"] ? [ud doubleForKey: @"Mail2UndoSendDelay"] : 5;
+	[self queueAt: [NSDate dateWithTimeIntervalSinceNow: MAX(0, delay)] undoable: delay > 0];
+}
+
+- (void) sendLater: (id)sender
+{
+	NSDate *when = Mail2ChooseSendTime();
+	if (when != nil)
+		[self queueAt: when undoable: NO];
+}
+
+/* a message the Outbox gave back (Undo Send, or Edit in the Outbox): in a compose window again */
++ (Mail2Compose *) reopenOutgoing: (NSDictionary *)d sessions: (NSArray *)all
+{
+	Mail2Session *s = nil;
+	NSEnumerator *e = [all objectEnumerator];
+	Mail2Session *x;
+	while ((x = [e nextObject]) != nil)
+		if ([[[x account] identifier] isEqualToString: [d objectForKey: @"Account"]])
+			s = x;
+	Mail2Compose *c = [[[Mail2Compose alloc] initWithSessions: all session: s] autorelease];
+	Mail2ParsedMessage *p = [Mail2ParsedMessage parseData: [d objectForKey: @"Message"] preferPlainText: YES];
+	[c->toField setStringValue: [d objectForKey: @"To"] ? [d objectForKey: @"To"] : @""];
+	[c->ccField setStringValue: [d objectForKey: @"Cc"] ? [d objectForKey: @"Cc"] : @""];
+	[c->bccField setStringValue: [d objectForKey: @"Bcc"] ? [d objectForKey: @"Bcc"] : @""];
+	[c->subjectField setStringValue: [d objectForKey: @"Subject"] ? [d objectForKey: @"Subject"] : @""];
+	[c->window setTitle: [c plainTitle]];
+	NSInteger i;
+	for (i = 0; i < [c->fromPopup numberOfItems]; i++)
+		if ([[[[c->fromPopup itemAtIndex: i] representedObject] objectAtIndex: 1] isEqualToString: [d objectForKey: @"From"]])
+			[c->fromPopup selectItemAtIndex: i];
+	NSString *mid = [d objectForKey: @"MessageId"];
+	NSData *rtfd = mid ? [NSData dataWithContentsOfFile: rtfd_path(mid)] : nil;
+	NSAttributedString *kept = rtfd ? [[[NSAttributedString alloc] initWithRTFD: rtfd documentAttributes: NULL] autorelease] : nil;
+	if (kept != nil && c->rich)
+		[[c->bodyView textStorage] setAttributedString: kept];
+	else
+		[c->bodyView setString: [p body] ? [p body] : @""];
+	if (mid)
+		[[NSFileManager defaultManager] removeItemAtPath: rtfd_path(mid) error: NULL];
+	[c->attachments addObjectsFromArray: [p attachments]];
+	ASSIGN(c->inReplyTo, [p inReplyTo]);
+	ASSIGN(c->references, [p references]);
+	ASSIGN(c->draftId, [d objectForKey: @"Draft"]);
+	if ([d objectForKey: @"ReplyTo"])
+		ASSIGN(c->original, [[Mail2Store sharedStore] messageWithRowID: [[d objectForKey: @"ReplyTo"] longLongValue]]);
+	[c layoutAttachments];
+	[c setDirty: YES];
+	[c showFocusing: c->bodyView];
+	return c;
 }
 
 - (BOOL) windowShouldClose: (id)w
