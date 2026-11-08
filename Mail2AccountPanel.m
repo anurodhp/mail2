@@ -74,19 +74,6 @@ redisplay_soon(NSWindow *w)
 /* a content rect of this size in the middle of the screen. Windows are made where they will be: -center after
  * creation left these windows' contents unpainted on screen (QEMU, 2026-11-08), while the viewer and compose
  * windows, made in place, were fine. */
-/* the panel's background; logs its drawing with MAIL2_DEBUG (whether it is drawn at all, QEMU 2026-11-08) */
-@interface Mail2PanelBackground : NSView
-@end
-@implementation Mail2PanelBackground
-- (void) drawRect: (NSRect)r
-{
-	if (Mail2Debug())
-		NSLog(@"Mail2: %@ drawn %@", [[self window] title], NSStringFromRect(r));
-	[[NSColor windowBackgroundColor] set];
-	NSRectFill(r);
-}
-@end
-
 static NSRect
 centered(CGFloat w, CGFloat h)
 {
@@ -108,7 +95,6 @@ centered(CGFloat w, CGFloat h)
 	panel = [[Mail2KeyOrderPanel alloc] initWithContentRect: centered(480, 590)
 	    styleMask: NSTitledWindowMask | NSClosableWindowMask backing: NSBackingStoreBuffered defer: NO];
 	[panel setHidesOnDeactivate: NO];
-	[panel setContentView: [[[Mail2PanelBackground alloc] initWithFrame: [[panel contentView] frame]] autorelease]];
 	[panel setDelegate: (id)self];
 	[panel setTitle: @"Mail Account"];
 	NSView *v = [panel contentView];
@@ -480,7 +466,6 @@ small_button(NSView *v, NSString *title, NSRect r, id target, SEL action)
 	panel = [[NSPanel alloc] initWithContentRect: centered(460, 300)	/* a panel: see the account panel */
 	    styleMask: NSTitledWindowMask | NSClosableWindowMask | NSResizableWindowMask backing: NSBackingStoreBuffered defer: NO];
 	[panel setHidesOnDeactivate: NO];
-	[panel setContentView: [[[Mail2PanelBackground alloc] initWithFrame: [[panel contentView] frame]] autorelease]];
 	[panel setTitle: @"Accounts"];
 	[panel setReleasedWhenClosed: NO];
 	[panel setMinSize: NSMakeSize(360, 200)];
