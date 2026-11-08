@@ -10,6 +10,10 @@
 #import <AppKit/AppKit.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <dlfcn.h>
+#include <unistd.h>
+#include <sys/ucontext.h>
+#include <sys/syscall.h>
 #import "Mail2Account.h"
 #import "Mail2AccountPanel.h"
 #import "Mail2RulesWindow.h"
@@ -99,6 +103,111 @@ mailto_argument(void)
  * run-loop mode it was last seen in (a stuck main thread, or one inside a tracking loop) */
 static volatile double heartbeat;
 static NSString *volatile heartbeatMode;
+
+/* MAIL2_DEBUG=1: a crash prints its stack to stderr. This system's backtrace() captures nothing, so the frame pointers
+ * (which arm64 code here keeps) are walked from the crashing thread's registers, each return address named with
+ * dladdr(). Only async-signal-safe calls (write, dladdr reads loaded images' tables) and no allocation. */
+static void
+crash_puts(const char *s)
+{
+	(void)write(2, s, strlen(s));
+}
+
+static void
+crash_hex(uintptr_t v)
+{
+	char b[19] = "0x";
+	int i;
+	for (i = 0; i < 16; i++)
+		b[2 + i] = "0123456789abcdef"[(v >> (60 - 4 * i)) & 0xf];
+	b[18] = 0;
+	crash_puts(b);
+}
+
+static void
+crash_frame(int n, uintptr_t pc)
+{
+	Dl_info info;
+	char num[8];
+	snprintf(num, sizeof(num), "%2d ", n);
+	crash_puts(num);
+	crash_hex(pc);
+	if (dladdr((void *)pc, &info) && info.dli_fname) {
+		const char *f = strrchr(info.dli_fname, '/');
+		crash_puts(" ");
+		crash_puts(f ? f + 1 : info.dli_fname);
+		if (info.dli_sname) {
+			crash_puts(" ");
+			crash_puts(info.dli_sname);
+			crash_puts(" + ");
+			crash_hex(pc - (uintptr_t)info.dli_saddr);
+		}
+	}
+	crash_puts("\n");
+}
+
+static void
+crash_handler(int sig, siginfo_t *si, void *ctx)
+{
+	crash_puts("Mail2 crashed: signal ");
+	crash_puts(sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : sig == SIGILL ? "SIGILL" : sig == SIGABRT ? "SIGABRT" : "?");
+	crash_puts(" at address ");
+	crash_hex((uintptr_t)si->si_addr);
+	crash_puts("\n");
+#if defined(__arm64__) || defined(__aarch64__)
+	ucontext_t *uc = ctx;
+	uintptr_t pc = uc->uc_mcontext->__ss.__pc, lr = uc->uc_mcontext->__ss.__lr, fp = uc->uc_mcontext->__ss.__fp;
+	int n = 0;
+	crash_frame(n++, pc);
+	crash_frame(n++, lr);	/* a leaf function may not have pushed a frame yet */
+	while (fp != 0 && (fp & 7) == 0 && n < 48) {
+		uintptr_t *f = (uintptr_t *)fp;
+		uintptr_t next = f[0], ret = f[1];
+		if (ret == 0)
+			break;
+		crash_frame(n++, ret);
+		if (next <= fp)	/* the stack grows down: a frame further up is at a higher address */
+			break;
+		fp = next;
+	}
+#else
+	(void)ctx;
+#endif
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
+/* sigaltstack(2) straight to the kernel: arm64 Darwin takes the call number in x16 and traps with svc #0x80 */
+static void
+raw_sigaltstack(stack_t *ss)
+{
+#if defined(__arm64__) || defined(__aarch64__)
+	register long x0 __asm__("x0") = (long)ss;
+	register long x1 __asm__("x1") = 0;
+	register long x16 __asm__("x16") = SYS_sigaltstack;
+	__asm__ volatile("svc #0x80" : "+r"(x0) : "r"(x1), "r"(x16) : "memory", "cc");
+#else
+	(void)ss;
+#endif
+}
+
+static void
+install_crash_handler(void)
+{
+	struct sigaction sa;
+	/* a stack of its own, so a stack overflow is reported too; libSystem here does not export sigaltstack(), the
+	 * kernel has it (SYS_sigaltstack). Main thread only; other threads report on their own stacks. */
+	static char altstack[128 * 1024];
+	stack_t ss = { altstack, sizeof(altstack), 0 };
+	raw_sigaltstack(&ss);
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_sigaction = crash_handler;
+	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+	sigaction(SIGSEGV, &sa, NULL);
+	sigaction(SIGBUS, &sa, NULL);
+	sigaction(SIGILL, &sa, NULL);
+	sigaction(SIGABRT, &sa, NULL);
+}
 
 @interface Mail2Watchdog : NSObject
 @end
@@ -419,8 +528,10 @@ static NSString *volatile heartbeatMode;
 - (void) applicationDidFinishLaunching: (NSNotification *)n
 {
 	[self buildMenus];
-	if (Mail2Debug())
+	if (Mail2Debug()) {
+		install_crash_handler();
 		[Mail2Watchdog start];
+	}
 	accounts = [[NSMutableArray alloc] initWithArray: [Mail2Account loadAccounts]];
 	[[NSNotificationCenter defaultCenter] addObserver: self selector: @selector(accountChanged:) name: Mail2AccountChanged object: nil];
 	NSLog(@"Mail2: %lu account(s) in %@", (unsigned long)[accounts count], Mail2SupportDirectory());
