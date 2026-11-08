@@ -56,6 +56,7 @@
 	NSView *remoteBar;		/* "remote content was not loaded" and its button */
 	NSButton *unsubButton;
 	Mail2ParsedMessage *shown;	/* for Unsubscribe and Show Raw Source */
+	NSArray *labelsShown;		/* Gmail's */
 	BOOL remoteBlocked;		/* the shown HTML has remote content that was not loaded */
 }
 - (void) showNothing: (NSString *)why;		/* "No Message Selected", "3 messages selected" */
@@ -69,6 +70,7 @@
 - (void) showConversation: (NSArray *)msgs parsed: (NSArray *)parsed;
 /* the parsed message shown: an Unsubscribe button when it has List-Unsubscribe */
 - (void) setParsed: (Mail2ParsedMessage *)p;
+- (void) setLabels: (NSArray *)labels;	/* Gmail's, under To and Cc */
 - (NSTextView *) textView;
 @end
 

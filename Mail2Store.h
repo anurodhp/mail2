@@ -154,6 +154,7 @@ enum {
 - (BOOL) isThreadMuted: (NSString *)thread;		/* from memory: quick enough for drawing rows */
 - (void) setAddress: (NSString *)addr blocked: (BOOL)on;
 - (BOOL) isAddressBlocked: (NSString *)addr;
+- (NSArray *) blockedAddresses;
 
 /* ---- addresses ---- */
 /* people seen ("Name <addr>" or "addr"), whose address or name starts with prefix (or a word of the name does),

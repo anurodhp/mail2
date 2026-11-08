@@ -9,6 +9,7 @@
 #include <libetpan/idle.h>
 #include <libetpan/uidplus.h>
 #include <libetpan/mailimap_oauth2.h>
+#include <libetpan/xgmlabels.h>
 #include <libetpan/mailimf.h>
 #include <errno.h>
 #include <poll.h>
@@ -773,6 +774,57 @@ imap_day(NSDate *d)
 		return NO;
 	}
 	return YES;
+}
+
+- (BOOL) copyUids: (NSArray *)uids to: (NSString *)mailbox error: (NSString **)err
+{
+	struct mailimap_set *set = uid_set(uids);
+	int rc = mailimap_uid_copy(IMAP, set, [mailbox UTF8String]);
+	mailimap_set_free(set);
+	if (rc != MAILIMAP_NO_ERROR) {
+		*err = imap_error(IMAP, rc, [NSString stringWithFormat: @"Copying to %@", Mail2DecodeMailboxName([mailbox UTF8String])]);
+		[self failed: rc];
+		return NO;
+	}
+	return YES;
+}
+
+- (NSArray *) gmailLabelsOf: (unsigned)uid error: (NSString **)err
+{
+	if (imap == NULL || !mailimap_has_xgmlabels(IMAP))
+		return nil;
+	struct mailimap_fetch_type *ft = mailimap_fetch_type_new_fetch_att_list_empty();
+	mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_xgmlabels());
+	struct mailimap_set *set = mailimap_set_new_single(uid);
+	clist *res = NULL;
+	int rc = mailimap_uid_fetch(IMAP, set, ft, &res);
+	mailimap_set_free(set);
+	mailimap_fetch_type_free(ft);
+	if (rc != MAILIMAP_NO_ERROR) {
+		*err = imap_error(IMAP, rc, @"Reading labels");
+		[self failed: rc];
+		return nil;
+	}
+	NSMutableArray *labels = [NSMutableArray array];
+	clistiter *it, *ai, *li;
+	for (it = clist_begin(res); it != NULL; it = clist_next(it)) {
+		struct mailimap_msg_att *ma = clist_content(it);
+		for (ai = clist_begin(ma->att_list); ai != NULL; ai = clist_next(ai)) {
+			struct mailimap_msg_att_item *item = clist_content(ai);
+			if (item->att_type != MAILIMAP_MSG_ATT_ITEM_EXTENSION || item->att_data.att_extension_data == NULL ||
+			    item->att_data.att_extension_data->ext_extension != &mailimap_extension_xgmlabels)
+				continue;
+			struct mailimap_msg_att_xgmlabels *xl = item->att_data.att_extension_data->ext_data;
+			for (li = xl ? clist_begin(xl->att_labels) : NULL; li != NULL; li = clist_next(li)) {
+				const char *l = clist_content(li);
+				/* \\Inbox, \\Important...: Gmail's own; the rest are the user's labels */
+				if (l && l[0] != '\\')
+					[labels addObject: Mail2DecodeMailboxName(l)];
+			}
+		}
+	}
+	mailimap_fetch_list_free(res);
+	return labels;
 }
 
 - (BOOL) appendMessage: (NSData *)raw to: (NSString *)mailbox flags: (int)flags error: (NSString **)err

@@ -3,6 +3,8 @@
 #import "Mail2Account.h"
 #import "Mail2Store.h"
 #import "Mail2Util.h"
+#import "Mail2Sieve.h"
+#include <dispatch/dispatch.h>
 
 /* ---- the editor of one rule (modal) ---- */
 
@@ -241,8 +243,15 @@ popup(NSView *v, NSRect r, id target, SEL action)
 		if (i == 1) editButton = [btn retain];
 		if (i == 2) removeButton = [btn retain];
 	}
-	NSTextField *hint = [[[NSTextField alloc] initWithFrame: NSMakeRect(308, 18, 200, 18)] autorelease];
-	[hint setStringValue: @"Rules run on new Inbox mail."];
+	NSButton *srv = [[[NSButton alloc] initWithFrame: NSMakeRect(304, 14, 130, 28)] autorelease];
+	[srv setTitle: @"Put on Server…"];
+	[srv setBezelStyle: NSRoundedBezelStyle];
+	[srv setTarget: self];
+	[srv setAction: @selector(putOnServer:)];
+	[srv setToolTip: @"Run these rules on the server too (Sieve), even while Mail2 is closed"];
+	[cv addSubview: srv];
+	NSTextField *hint = [[[NSTextField alloc] initWithFrame: NSMakeRect(438, 18, 80, 18)] autorelease];
+	[hint setStringValue: @"New mail."];
 	[hint setEditable: NO];
 	[hint setBezeled: NO];
 	[hint setDrawsBackground: NO];
@@ -327,6 +336,51 @@ popup(NSView *v, NSRect r, id target, SEL action)
 	Mail2RuleEditor *ed = [[[Mail2RuleEditor alloc] initWithAccounts: accounts] autorelease];
 	if ([ed runFor: [rules objectAtIndex: i]])
 		[self save];
+}
+
+/* every account's rules and blocked senders as its Sieve script, over ManageSieve */
+- (void) putOnServer: (id)sender
+{
+	if (NSRunAlertPanel(@"Put the Rules on the Server?", @"Each account's server will run these rules (and the blocked senders) "
+	    "on new mail even while Mail2 is closed, as a Sieve script named mail2 that replaces the active one. Servers with "
+	    "ManageSieve only (Dovecot, Fastmail; not Gmail or iCloud).", @"Put on Server", @"Cancel", nil) != NSAlertDefaultReturn)
+		return;
+	NSArray *rs = [[rules copy] autorelease];
+	NSArray *blocked = [[Mail2Store sharedStore] blockedAddresses];
+	NSArray *accs = [[accounts copy] autorelease];
+	NSMutableArray *scripts = [NSMutableArray array];
+	NSEnumerator *e = [accs objectEnumerator];
+	Mail2Account *a;
+	while ((a = [e nextObject]) != nil) {
+		NSString *trash = nil;
+		NSEnumerator *me = [[[Mail2Store sharedStore] mailboxesForAccount: [a identifier]] objectEnumerator];
+		Mail2Mailbox *m;
+		while ((m = [me nextObject]) != nil)
+			if ([[m special] isEqualToString: @"trash"])
+				trash = [m name];
+		[scripts addObject: Mail2SieveScript(rs, [a identifier], blocked, trash)];
+	}
+	[scripts retain];
+	[accs retain];
+	dispatch_async(dispatch_get_global_queue(0, 0), ^{
+		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+		NSMutableArray *report = [NSMutableArray array];
+		NSUInteger i;
+		for (i = 0; i < [accs count]; i++) {
+			NSString *err = nil;
+			Mail2Account *acc = [accs objectAtIndex: i];
+			BOOL ok = Mail2SieveUpload(acc, [scripts objectAtIndex: i], &err);
+			[report addObject: [NSString stringWithFormat: @"%@: %@", [acc email], ok ? @"on the server" : err]];
+		}
+		NSString *msg = [[report componentsJoinedByString: @"\n"] retain];
+		Mail2RunOnMain(^{
+			NSRunAlertPanel(@"Rules on the Server", @"%@", @"OK", nil, nil, msg);
+			[msg release];
+			[scripts release];
+			[accs release];
+		});
+		[pool release];
+	});
 }
 
 - (void) remove: (id)sender

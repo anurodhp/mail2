@@ -364,8 +364,10 @@ mailbox_icon(Mail2Mailbox *m)
 @interface Mail2HeaderView : NSView
 {
 	Mail2MessageInfo *msg;
+	NSArray *labels;
 }
 - (void) setMessage: (Mail2MessageInfo *)m;
+- (void) setLabels: (NSArray *)l;
 @end
 
 static NSString *
@@ -384,7 +386,8 @@ initials(NSString *name)
 
 - (BOOL) isFlipped { return YES; }
 - (void) dealloc { [msg release]; [super dealloc]; }
-- (void) setMessage: (Mail2MessageInfo *)m { ASSIGN(msg, m); [self setNeedsDisplay: YES]; }
+- (void) setMessage: (Mail2MessageInfo *)m { ASSIGN(msg, m); DESTROY(labels); [self setNeedsDisplay: YES]; }
+- (void) setLabels: (NSArray *)l { ASSIGN(labels, [l count] ? l : nil); [self setNeedsDisplay: YES]; }
 
 - (void) drawRect: (NSRect)r
 {
@@ -427,8 +430,13 @@ initials(NSString *name)
 		[Mail2FittedString([@"To: " stringByAppendingString: [msg to]], la, right - x) drawAtPoint: NSMakePoint(x, y)];
 		y += 16;
 	}
-	if ([[msg cc] length])
+	if ([[msg cc] length]) {
 		[Mail2FittedString([@"Cc: " stringByAppendingString: [msg cc]], la, right - x) drawAtPoint: NSMakePoint(x, y)];
+		y += 16;
+	}
+	if (labels)	/* Gmail's labels */
+		[Mail2FittedString([@"Labels: " stringByAppendingString: [labels componentsJoinedByString: @", "]], la, right - x)
+		    drawAtPoint: NSMakePoint(x, y)];
 }
 
 @end
@@ -638,6 +646,7 @@ preview_attachment(Mail2Attachment *a)
 - (void) dealloc
 {
 	[header release]; [attachBar release]; [scroll release]; [text release]; [empty release];
+	[labelsShown release];
 	[msg release]; [attachments release]; [web release]; [inlineParts release]; [remoteBar release];
 	[unsubButton release]; [shown release];
 	[super dealloc];
@@ -713,7 +722,7 @@ preview_attachment(Mail2Attachment *a)
 		[attachBar addSubview: b];
 		x += bf.size.width + 6;
 	}
-	CGFloat hh = 70 + ([[msg to] length] ? 16 : 0) + ([[msg cc] length] ? 16 : 0) + 10;
+	CGFloat hh = 70 + ([[msg to] length] ? 16 : 0) + ([[msg cc] length] ? 16 : 0) + ([labelsShown count] ? 16 : 0) + 10;
 	NSRect b = [self bounds];
 	[header setFrame: NSMakeRect(0, 0, NSWidth(b), hh)];
 	[attachBar setFrame: NSMakeRect(0, hh, NSWidth(b), h)];
@@ -903,6 +912,13 @@ Mail2StyleBody(NSMutableAttributedString *as)
 }
 
 /* ---- Unsubscribe ---- */
+
+- (void) setLabels: (NSArray *)l
+{
+	ASSIGN(labelsShown, [l count] ? l : nil);
+	[(Mail2HeaderView *)header setLabels: l];
+	[self layoutAttachments];
+}
 
 - (void) setParsed: (Mail2ParsedMessage *)p
 {

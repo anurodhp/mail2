@@ -51,6 +51,11 @@ extern NSString *const Mail2StatusChanged;
 - (void) moveMessages: (NSArray *)msgs toSpecial: (NSString *)special;
 /* to one of this account's mailboxes (Move To, a drop on the sidebar) */
 - (void) moveMessages: (NSArray *)msgs toMailbox: (Mail2Mailbox *)dest;
+/* a copy in another mailbox (on Gmail: the label that mailbox is, added; the message stays where it is) */
+- (void) copyMessages: (NSArray *)msgs toMailbox: (Mail2Mailbox *)dest;
+/* Gmail's labels of a message; the completion (main thread) gets nil elsewhere */
+- (void) labelsOf: (Mail2MessageInfo *)m completion: (void (^)(NSArray *labels))done;
+- (BOOL) isGmail;
 /* to the mailbox with this display name at the top of the account, made if it is missing (Snoozed) */
 - (void) moveMessages: (NSArray *)msgs toNamedMailbox: (NSString *)name;
 /* from the mailbox with that display name back to the one with this IMAP name, by Message-ID, unread if asked */

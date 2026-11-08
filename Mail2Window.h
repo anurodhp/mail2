@@ -60,6 +60,7 @@
 - (void) toggleMute: (id)sender;
 - (void) toggleBlock: (id)sender;
 - (void) snooze: (id)sender;
+- (void) labelAs: (id)sender;
 - (void) stopReminding: (id)sender;
 - (void) undoSend: (id)sender;
 - (void) outboxChanged: (NSNotification *)n;

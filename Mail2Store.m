@@ -1008,6 +1008,14 @@ like_pattern(NSString *t)
 	[lock unlock];
 }
 
+- (NSArray *) blockedAddresses
+{
+	[lock lock];
+	NSArray *r = [[blocked allObjects] sortedArrayUsingSelector: @selector(compare:)];
+	[lock unlock];
+	return r;
+}
+
 - (BOOL) isAddressBlocked: (NSString *)addr
 {
 	[lock lock];

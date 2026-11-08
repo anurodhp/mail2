@@ -45,6 +45,10 @@
 - (BOOL) moveUids: (NSArray *)uids to: (NSString *)mailbox error: (NSString **)err;
 /* deletes for good: \Deleted, then UID EXPUNGE (plain EXPUNGE without UIDPLUS) */
 - (BOOL) expungeUids: (NSArray *)uids error: (NSString **)err;
+/* UID COPY (Gmail: adds the label that mailbox is) */
+- (BOOL) copyUids: (NSArray *)uids to: (NSString *)mailbox error: (NSString **)err;
+/* Gmail's labels of a message (X-GM-LABELS), decoded; nil when the server has none */
+- (NSArray *) gmailLabelsOf: (unsigned)uid error: (NSString **)err;
 - (BOOL) appendMessage: (NSData *)raw to: (NSString *)mailbox flags: (int)flags error: (NSString **)err;
 
 /* IDLE on the selected mailbox until the server reports a change, wakeFd becomes readable, or timeout seconds pass.

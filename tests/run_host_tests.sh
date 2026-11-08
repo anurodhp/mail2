@@ -63,7 +63,7 @@ fi
 echo "building core_test"
 clang -fno-objc-arc -fblocks -O0 -g -Wall -Wno-deprecated-declarations -include tests/gnustep_compat.h \
     -I "$ROOT" -I "$STAGE/include" -I "$B/mbedtls/include" -I "$SDK/usr/include/libxml2" \
-    Mail2TLS.c Mail2Util.m Mail2Account.m Mail2Store.m Mail2IMAP.m Mail2SMTP.m Mail2Message.m Mail2Session.m Mail2OAuth.m Mail2Rules.m Mail2RichText.m Mail2Outbox.m Mail2Spell.m Mail2Snooze.m \
+    Mail2TLS.c Mail2Util.m Mail2Account.m Mail2Store.m Mail2IMAP.m Mail2SMTP.m Mail2Message.m Mail2Session.m Mail2OAuth.m Mail2Rules.m Mail2RichText.m Mail2Outbox.m Mail2Spell.m Mail2Snooze.m Mail2Sieve.m \
     tests/core_test.m -o "$B/core_test" \
     "$B/libetpan.a" "$B/libhunspell.a" -lc++ -L "$B/mbedtls/lib" -lmbedtls -lmbedx509 -lmbedcrypto \
     -framework Foundation -framework AppKit -lsqlite3 -lxml2 -liconv
@@ -84,8 +84,12 @@ GM_PID=$!
 # the OAuth endpoints' stand-in (tests/oauth_mock.py)
 python3 -I "$ROOT/tests/oauth_mock.py" 3080 > "$B/oauth_mock.log" 2>&1 &
 OA_PID=$!
-trap 'kill $GM_PID $OA_PID 2>/dev/null || true' EXIT
-for i in $(seq 1 60); do nc -z 127.0.0.1 3143 2>/dev/null && nc -z 127.0.0.1 3025 2>/dev/null && nc -z 127.0.0.1 3080 2>/dev/null && break; sleep 0.5; done
+# a ManageSieve stand-in (tests/sieve_mock.py), writing what it is given to $B/sieve
+rm -rf "$B/sieve"; mkdir -p "$B/sieve"
+python3 -I "$ROOT/tests/sieve_mock.py" "$B/sieve" > "$B/sieve_mock.log" 2>&1 &
+SV_PID=$!
+trap 'kill $GM_PID $OA_PID $SV_PID 2>/dev/null || true' EXIT
+for i in $(seq 1 60); do nc -z 127.0.0.1 3143 2>/dev/null && nc -z 127.0.0.1 3025 2>/dev/null && nc -z 127.0.0.1 3080 2>/dev/null && nc -z 127.0.0.1 4190 2>/dev/null && break; sleep 0.5; done
 
 rm -rf "$B/support"; mkdir -p "$B/support"
-MAIL2_SUPPORT_DIR="$B/support" NETWORK_TLS="${NETWORK_TLS:-1}" "$B/core_test"
+SIEVE_OUT="$B/sieve" MAIL2_SUPPORT_DIR="$B/support" NETWORK_TLS="${NETWORK_TLS:-1}" "$B/core_test"

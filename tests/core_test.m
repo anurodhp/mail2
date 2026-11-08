@@ -14,6 +14,7 @@
 #import "Mail2Outbox.h"
 #import "Mail2Spell.h"
 #import "Mail2Snooze.h"
+#import "Mail2Sieve.h"
 #include <mbedtls/sha256.h>
 #include "Mail2TLS.h"
 #include <libetpan/mailstream.h>
@@ -1013,6 +1014,53 @@ main(void)
 			[later check]; return [[later dueFollowUps] count] == 0; }, 30);
 		CHECK(answered, "answered: the reminder goes");
 		[zs release];
+	}
+
+	printf("Sieve, Copy To\n");
+	{
+		NSArray *rl = [NSArray arrayWithObjects:
+		    [Mail2Rule ruleWithPlist: [NSDictionary dictionaryWithObjectsAndKeys: @"digest", @"Contains",
+		        [NSNumber numberWithInt: Mail2RuleSubject], @"Field", [NSNumber numberWithInt: Mail2RuleMove], @"Action",
+		        @"Re&AOc-us", @"Mailbox", nil]],
+		    [Mail2Rule ruleWithPlist: [NSDictionary dictionaryWithObjectsAndKeys: @"say \"hi\"", @"Contains",
+		        [NSNumber numberWithInt: Mail2RuleAny], @"Field", [NSNumber numberWithInt: Mail2RuleFlag], @"Action", nil]],
+		    [Mail2Rule ruleWithPlist: [NSDictionary dictionaryWithObjectsAndKeys: @"other", @"Contains", @"x@y", @"Account", nil]], nil];
+		NSString *sc = Mail2SieveScript(rl, @"test1@localhost", [NSArray arrayWithObject: @"spam@example.com"], @"Trash");
+		BOOL scriptOK = [sc rangeOfString: @"require [\"fileinto\", \"imap4flags\"];"].location != NSNotFound &&
+		    [sc rangeOfString: @"if address :is \"from\" [\"spam@example.com\"] {\n  fileinto \"Trash\";"].location != NSNotFound &&
+		    [sc rangeOfString: @"if header :contains \"subject\" \"digest\" {\n  fileinto \"Reçus\";\n  stop;"].location != NSNotFound &&
+		    [sc rangeOfString: @"\"say \\\"hi\\\"\" {\n  addflag \"\\\\Flagged\";"].location != NSNotFound &&
+		    [sc rangeOfString: @"other"].location == NSNotFound;
+		CHECK(scriptOK, "the script: blocked senders, a move (UTF-8 name), escaping, a flag; other accounts' rules left out");
+		if (!scriptOK)
+			printf("%s\n", [sc UTF8String]);
+		NSString *serr = nil;
+		BOOL up = Mail2SieveUpload(a1, sc, &serr);
+		NSString *outDir = [NSString stringWithUTF8String: getenv("SIEVE_OUT") ? getenv("SIEVE_OUT") : "."];
+		NSString *got = [NSString stringWithContentsOfFile: [outDir stringByAppendingPathComponent: @"mail2.sieve"] encoding: NSUTF8StringEncoding error: NULL];
+		NSString *active = [NSString stringWithContentsOfFile: [outDir stringByAppendingPathComponent: @"ACTIVE"] encoding: NSUTF8StringEncoding error: NULL];
+		CHECK(up && [got isEqualToString: sc] && [active isEqualToString: @"mail2"], "ManageSieve: logged in, PUTSCRIPT, SETACTIVE (%@)", serr);
+		Mail2Account *wrong = account(@"test1@localhost", @"nope");
+		serr = nil;
+		CHECK(!Mail2SieveUpload(wrong, sc, &serr) && [serr rangeOfString: @"bad login"].location != NSNotFound, "a refused login says so: %@", serr);
+
+		Mail2Session *cs = [[Mail2Session alloc] initWithAccount: a1];
+		[cs refreshMailboxes];
+		wait_for(^BOOL { return ![cs isBusy]; }, 20);
+		[cs createMailboxNamed: @"Kept"];
+		wait_for(^BOOL { return ![cs isBusy]; }, 20);
+		Mail2Mailbox *kept = nil, *mb;
+		NSEnumerator *me = [[store mailboxesForAccount: @"test1@localhost"] objectEnumerator];
+		while ((mb = [me nextObject]) != nil)
+			if ([[mb displayName] isEqualToString: @"Kept"])
+				kept = mb;
+		Mail2Mailbox *ib = [cs mailboxWithSpecial: @"inbox"];
+		NSUInteger inboxN = [[store messagesInMailbox: [ib mbid] limit: 1000] count];
+		[cs copyMessages: [store messagesInMailbox: [ib mbid] limit: 1] toMailbox: kept];
+		wait_for(^BOOL { return ![cs isBusy]; }, 20);
+		CHECK(kept && [[store messagesInMailbox: [kept mbid] limit: 10] count] == 1 &&
+		    [[store messagesInMailbox: [ib mbid] limit: 1000] count] == inboxN, "Copy To: a copy there, the message still here");
+		[cs release];
 	}
 
 	printf("\n%d checks, %d failed\n", checks, failures);

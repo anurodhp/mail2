@@ -6,9 +6,9 @@
 
 ## Status
 
-As of November 8, 2026 (version 0.7):
+As of November 8, 2026 (version 0.8):
 
-- **Works, tested against a real IMAP/SMTP server** (GreenMail, natively on the Mac, 143 checks in `tests/`): TLS with certificate checks, login, mailbox list with the special mailboxes found, the first sync and later ones, new mail pushed through IDLE, reading (plain text, HTML as text, attachments), read/unread and flags both ways, archive and delete (MOVE, or COPY + EXPUNGE), sending with SMTP (AUTH PLAIN/LOGIN), the Sent copy, the Maildir files and the index; and since 0.2 sending files (binary and non-ASCII names round trip), conversations (References), local and server search, fetching mail older than the first sync, and drafts saved, replaced and removed on the server; since 0.3 All Inboxes across two accounts, and OAuth: XOAUTH2 logins to IMAP and SMTP, token refresh (with Microsoft's refresh-token rotation), the device-code flow, the browser flow with PKCE, a revoked sign-in and Cancel, against a stand-in for the providers (`tests/oauth_mock.py`). TLS was also checked against `imap.gmail.com:993`.
+- **Works, tested against a real IMAP/SMTP server** (GreenMail, natively on the Mac, 151 checks in `tests/`): TLS with certificate checks, login, mailbox list with the special mailboxes found, the first sync and later ones, new mail pushed through IDLE, reading (plain text, HTML as text, attachments), read/unread and flags both ways, archive and delete (MOVE, or COPY + EXPUNGE), sending with SMTP (AUTH PLAIN/LOGIN), the Sent copy, the Maildir files and the index; and since 0.2 sending files (binary and non-ASCII names round trip), conversations (References), local and server search, fetching mail older than the first sync, and drafts saved, replaced and removed on the server; since 0.3 All Inboxes across two accounts, and OAuth: XOAUTH2 logins to IMAP and SMTP, token refresh (with Microsoft's refresh-token rotation), the device-code flow, the browser flow with PKCE, a revoked sign-in and Cancel, against a stand-in for the providers (`tests/oauth_mock.py`). TLS was also checked against `imap.gmail.com:993`.
 - **Built for the Pi and run end to end under QEMU** on the real desktop (Window Maker, Naples, Milan): it syncs the Inbox from a server on the host, opens a conversation of three, shows a message and marks it read on the server, updates the dock badge, searches, reopens a draft with its attachment from the server's Drafts and sends it (the server receives it with `plan.pdf`, and Drafts is empty after), and sends a message typed into the compose window (`tools/qemu_shots.sh`, screenshots in `docs/`).
 - **HTML mail in WebKit, under QEMU**: with Florence's engine copied into the image (`FLORENCE_DEPLOY=… tools/qemu_shots.sh`), an HTML message is drawn by WebKit in the message pane (`docs/qemu-html.png`). The first HTML message starts WebKit's processes; under QEMU that held the window for about 17 seconds, once. Not yet measured on the Pi.
 - Things this port taught it: signals interrupt blocking calls on every thread (libetpan's own socket reads gave up on EINTR, so Mail2 has its own stream driver for plain connections too); GNUstep redraws only after an event (Mail2 posts one after background results); and GNUstep's Tab order is not used (the compose window and account panel set their own).
@@ -43,6 +43,9 @@ As of November 8, 2026 (version 0.7):
 - Search filters: `from:`, `to:`, `subject:`, `has:attachment`, `is:unread`, `is:read`, `is:flagged`, `before:2026-11-01`, `after:…`, quotes for values with spaces, with free words; locally and on the server (IMAP SEARCH). Mailbox > Save Search as Smart Mailbox keeps one in the sidebar (across every mailbox but Trash and Junk); Delete Mailbox removes it.
 - Mute Conversation: new replies in it arrive read, its rows show a bell-off. Block Sender: their new mail goes straight to the Trash (and, if you choose, what is already here).
 - Attachments: a click previews pictures and text files (with Save and Open), else offers Save or Open with the desktop's application for it.
+- Snooze (Message menu): the message goes to a Snoozed mailbox on the server and comes back to where it was, unread, at the time chosen; Unsnooze brings it back now. Remind Me If No Reply (File menu, while writing): if nobody answers in the days chosen, the message is listed in a Follow Up smart mailbox (Stop Reminding takes it off).
+- Rules on the server: Mail2 > Rules > Put on Server sends the rules and blocked senders to each account's server as a Sieve script over ManageSieve, so they run while Mail2 is closed (Dovecot, Fastmail and others; not Gmail or iCloud).
+- Gmail labels: shown under To and Cc; Message > Label As… adds one (a copy in the label's mailbox), and Copy To… does the same for folders elsewhere.
 - Flagged: a smart mailbox at the top of the sidebar with every flagged message of every account, while there are any.
 - Edit > Undo (Cmd-Z) takes back Archive, Delete, Mark as Junk, Move To and a drop on a mailbox (the messages are found again by Message-ID and moved back); Redo does it again.
 - Unsubscribe: a button in the message header when the mail has List-Unsubscribe. With one-click (RFC 8058) Mail2 asks the list to stop by itself; otherwise it opens the list's page, or a message to its address.
@@ -137,7 +140,8 @@ On the Pi, `MAIL2_DEBUG=1 /Applications/Mail2.app/Mail2` logs the IMAP and SMTP 
 | `Mail2Account.m`, `Mail2Util.m`, `MilanText.m` | settings, helpers, font fallback (from Milan) |
 | `Mail2RichText.m`, `Mail2Outbox.m`, `Mail2Spell.m` | formatted text to HTML, the Outbox, spelling (Hunspell) |
 | `dict/` | the en_US Hunspell dictionary and its licence |
-| `Mail2Rules.m`, `Mail2RulesWindow.m` | rules for new mail, and their window |
+| `Mail2Rules.m`, `Mail2RulesWindow.m`, `Mail2Sieve.m` | rules for new mail, their window, and the same as Sieve over ManageSieve |
+| `Mail2Snooze.m` | snoozed messages and follow-up reminders |
 | `Mail2OAuth.m` | OAuth sign-in (browser with PKCE, device code), token refresh, the small HTTPS client |
 | `icons/`, `tools/make_icons.sh`, `tools/make_icon.m` | Lucide glyphs, the app icon (a letter with a stamp and a HELLO FROM BOSTON postmark, on blue), and their generators |
 | `tests/` | the host test of the mail core |

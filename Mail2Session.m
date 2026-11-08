@@ -704,6 +704,67 @@ Mail2ClearDockBadge(void)
 	[sn autorelease];
 }
 
+- (BOOL) isGmail
+{
+	NSString *h = [[account imapHost] lowercaseString];
+	return [h hasSuffix: @"gmail.com"] || [h hasSuffix: @"googlemail.com"];
+}
+
+- (void) copyMessages: (NSArray *)msgs toMailbox: (Mail2Mailbox *)dest
+{
+	NSMutableDictionary *byMailbox = [NSMutableDictionary dictionary];
+	NSEnumerator *e = [msgs objectEnumerator];
+	Mail2MessageInfo *m;
+	while ((m = [e nextObject]) != nil) {
+		if ([m mbid] == [dest mbid])
+			continue;
+		NSNumber *k = [NSNumber numberWithLongLong: [m mbid]];
+		NSMutableArray *a = [byMailbox objectForKey: k];
+		if (a == nil)
+			[byMailbox setObject: (a = [NSMutableArray array]) forKey: k];
+		[a addObject: [NSNumber numberWithUnsignedInt: [m uid]]];
+	}
+	NSString *dn = [[dest name] copy];
+	long long did = [dest mbid];
+	NSEnumerator *ke = [byMailbox keyEnumerator];
+	NSNumber *k;
+	while ((k = [ke nextObject]) != nil) {
+		long long mbid = [k longLongValue];
+		NSArray *uids = [byMailbox objectForKey: k];
+		[self run: [self isGmail] ? @"Labelling…" : @"Copying…" work: ^BOOL (NSString **err) {
+			Mail2Mailbox *mb = [[Mail2Store sharedStore] mailboxWithID: mbid];
+			if (mb == nil || ![imap select: [mb name] uidValidity: NULL uidNext: NULL exists: NULL error: err] ||
+			    ![imap copyUids: uids to: dn error: err])
+				return mb == nil;
+			Mail2Mailbox *d = [[Mail2Store sharedStore] mailboxWithID: did];
+			return d == nil || [self q_sync: d error: err];
+		}];
+	}
+	[dn autorelease];
+}
+
+- (void) labelsOf: (Mail2MessageInfo *)m completion: (void (^)(NSArray *labels))done
+{
+	if (![self isGmail]) {
+		done(nil);
+		return;
+	}
+	void (^cb)(NSArray *) = [done copy];
+	long long mbid = [m mbid];
+	unsigned uid = [m uid];
+	dispatch_async(Q, ^{
+		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+		NSString *err = nil;
+		Mail2Mailbox *mb = [[Mail2Store sharedStore] mailboxWithID: mbid];
+		NSArray *labels = nil;
+		if (mb && [imap connect: &err] && [imap select: [mb name] uidValidity: NULL uidNext: NULL exists: NULL error: &err])
+			labels = [imap gmailLabelsOf: uid error: &err];
+		[labels retain];
+		Mail2RunOnMain(^{ cb(labels); [cb release]; [labels release]; });
+		[pool release];
+	});
+}
+
 - (Mail2Mailbox *) mailboxNamed: (NSString *)display
 {
 	NSEnumerator *e = [[[Mail2Store sharedStore] mailboxesForAccount: [account identifier]] objectEnumerator];

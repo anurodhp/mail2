@@ -253,7 +253,7 @@ static NSString *volatile heartbeatMode;
 	NSDictionary *opts = [NSDictionary dictionaryWithObjectsAndKeys:
 	    @"Mail2", @"ApplicationName",
 	    @"A small IMAP mail client for GNUstep.", @"ApplicationDescription",
-	    @"0.7", @"ApplicationRelease",
+	    @"0.8", @"ApplicationRelease",
 	    [NSArray arrayWithObject: @"Anurodh Pokharel"], @"Authors",
 	    @"Copyright © 2026 Anurodh Pokharel. MIT license.", @"Copyright",
 	    @"Mail by libetpan 1.9.4 (BSD), SQLite 3.44 (public domain) and Mbed TLS 3.6 (Apache-2.0). Icons from Lucide (ISC).",
@@ -282,6 +282,7 @@ static NSString *volatile heartbeatMode;
 - (void) saveSearch: (id)s { [viewer saveSearch: s]; }
 - (void) toggleMute: (id)s { [viewer toggleMute: s]; }
 - (void) snooze: (id)s { [viewer snooze: s]; }
+- (void) labelAs: (id)s { [viewer labelAs: s]; }
 - (void) stopReminding: (id)s { [viewer stopReminding: s]; }
 - (void) toggleBlock: (id)s { [viewer toggleBlock: s]; }
 
@@ -301,7 +302,7 @@ static NSString *volatile heartbeatMode;
 {
 	SEL a = [i action];
 
-	if ((a == @selector(toggleMute:) || a == @selector(toggleBlock:) || a == @selector(snooze:)) && viewer != nil)
+	if ((a == @selector(toggleMute:) || a == @selector(toggleBlock:) || a == @selector(snooze:) || a == @selector(labelAs:)) && viewer != nil)
 		return [viewer validateMenuItem: i];
 	if (a == @selector(toggleConversations:)) {
 		[i setState: [Mail2Window organizesByConversation] ? NSOnState : NSOffState];
@@ -391,6 +392,7 @@ static NSString *volatile heartbeatMode;
 	add_item(m, @"Archive", @selector(archive:), @"A", self);
 	add_item(m, @"Move to Trash", @selector(deleteMessages:), nil, self);
 	add_item(m, @"Move To…", @selector(moveTo:), @"M", self);
+	add_item(m, @"Copy To…", @selector(labelAs:), nil, self);
 	add_item(m, @"Mark as Junk", @selector(markJunk:), @"J", self);
 	add_item(m, @"Apply Rules", @selector(applyRules:), nil, self);
 	add_item(m, @"Snooze…", @selector(snooze:), nil, self);

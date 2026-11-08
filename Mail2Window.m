@@ -845,6 +845,10 @@ scroller_for(NSTableView *t, NSRect r)
 					[messageView showMessage: m body: [p body] attachments: [p attachments] html: [p htmlSource]
 					    inlineParts: [p inlineParts]];
 					[messageView setParsed: p];
+					[[self sessionForMessage: m] labelsOf: m completion: ^(NSArray *labels) {
+						if (gen == showGeneration && labels)
+							[messageView setLabels: labels];
+					}];
 				}
 				else
 					[messageView showMessage: m body: @"This message could not be read." attachments: nil];
@@ -934,6 +938,8 @@ scroller_for(NSTableView *t, NSRect r)
 		return [self selectedMessage] != nil;
 	if (a == @selector(toggleMute:))
 		return [[self selectedMessage] thread] != nil;
+	if (a == @selector(labelAs:))
+		return [[self selectedMessages] count] > 0 && [self sessionOfSelection] != nil;
 	if (a == @selector(snooze:))
 		return [[self selectedMessages] count] > 0 && ([self inSnoozed] || ![current isVirtual] || [current mbid] == Mail2AllInboxesID);
 	if (a == @selector(stopReminding:))
@@ -978,6 +984,8 @@ scroller_for(NSTableView *t, NSRect r)
 - (BOOL) validateMenuItem: (NSMenuItem *)item
 {
 	Mail2MessageInfo *m = [self selectedMessage];
+	if ([item action] == @selector(labelAs:))
+		[item setTitle: [[self sessionOfSelection] isGmail] ? @"Label As…" : @"Copy To…"];
 	if ([item action] == @selector(snooze:))
 		[item setTitle: [self inSnoozed] ? @"Unsnooze" : @"Snooze…"];
 	if ([item action] == @selector(toggleMute:))
@@ -1480,6 +1488,28 @@ scroller_for(NSTableView *t, NSRect r)
 		[self reloadMessages];
 		[self showSelection];
 	}
+}
+
+/* Gmail: Label As (a copy in the label's mailbox adds the label); elsewhere Copy To */
+- (void) labelAs: (id)sender
+{
+	Mail2Session *s = [self sessionOfSelection];
+	if (s == nil)
+		return;
+	NSMutableArray *boxes = [NSMutableArray array];
+	NSEnumerator *e = [[[Mail2Store sharedStore] mailboxesForAccount: [[s account] identifier]] objectEnumerator];
+	Mail2Mailbox *m;
+	while ((m = [e nextObject]) != nil)
+		if ([m selectable] && [m special] == nil && [m mbid] != [current mbid])
+			[boxes addObject: m];
+	if ([boxes count] == 0) {
+		NSRunAlertPanel([s isGmail] ? @"Label As" : @"Copy To", @"There is no label or folder of your own to use yet.", @"OK", nil, nil);
+		return;
+	}
+	Mail2Mailbox *dest = Mail2ChooseMailbox([s isGmail] ? @"Label As" : @"Copy To",
+	    [s isGmail] ? @"Add the label:" : @"Put a copy in:", boxes, [s isGmail] ? @"Label" : @"Copy");
+	if (dest != nil)
+		[s copyMessages: [self actionMessages] toMailbox: dest];
 }
 
 - (void) applyRules: (id)sender
