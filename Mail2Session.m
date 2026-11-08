@@ -4,6 +4,7 @@
 #import "Mail2SMTP.h"
 #import "Mail2Message.h"
 #import "Mail2Util.h"
+#import "Mail2Rules.h"
 #import <AppKit/AppKit.h>
 #include <dispatch/dispatch.h>
 #include <fcntl.h>
@@ -220,6 +221,9 @@ Mail2ClearDockBadge(void)
 			if (infos == nil)
 				return NO;
 			[store addMessages: infos];
+			/* new mail in an Inbox meets the rules (not the first sync's backlog) */
+			if (maxKnown > 0 && [[mb special] isEqualToString: @"inbox"] && ![self q_applyRules: infos inMailbox: mb error: err])
+				return NO;
 			[self postMessagesChanged: mbid];
 		}
 	}
@@ -482,14 +486,36 @@ Mail2ClearDockBadge(void)
 
 - (void) moveMessages: (NSArray *)msgs toSpecial: (NSString *)special
 {
-	Mail2Store *store = [Mail2Store sharedStore];
 	Mail2Mailbox *dest = [self mailboxWithSpecial: special];
 	if (dest == nil && [special isEqualToString: @"archive"])
 		dest = [self mailboxWithSpecial: @"all"];	/* Gmail: archiving is leaving the Inbox for All Mail */
+	[self moveMessages: msgs toMailbox: dest special: special];
+}
+
+- (void) moveMessages: (NSArray *)msgs toMailbox: (Mail2Mailbox *)dest
+{
+	if (dest != nil)
+		[self moveMessages: msgs toMailbox: dest special: nil];
+}
+
+/* special says what a missing destination means: "trash" deletes for good, "archive" and "junk" are errors */
+- (void) moveMessages: (NSArray *)msgs toMailbox: (Mail2Mailbox *)dest special: (NSString *)special
+{
+	Mail2Store *store = [Mail2Store sharedStore];
+	if (dest == nil && ![special isEqualToString: @"trash"]) {
+		/* nowhere to put them: say so, and touch nothing (a row removed here would not come back with the next sync) */
+		NSString *e = [NSString stringWithFormat: @"This account has no %@ mailbox.",
+		    [special isEqualToString: @"junk"] ? @"Junk" : @"Archive"];
+		[self begin: nil];
+		[self end: e];
+		return;
+	}
 	NSMutableDictionary *byMailbox = [NSMutableDictionary dictionary];
 	NSEnumerator *e = [msgs objectEnumerator];
 	Mail2MessageInfo *m;
 	while ((m = [e nextObject]) != nil) {
+		if (dest != nil && [m mbid] == [dest mbid] && ![special isEqualToString: @"trash"])
+			continue;	/* already there */
 		NSNumber *k = [NSNumber numberWithLongLong: [m mbid]];
 		NSMutableArray *a = [byMailbox objectForKey: k];
 		if (a == nil)
@@ -501,19 +527,22 @@ Mail2ClearDockBadge(void)
 	NSNumber *k;
 	NSString *destName = [[dest name] copy];
 	long long destId = dest ? [dest mbid] : 0;
+	NSString *what = [special isEqualToString: @"trash"] ? @"Deleting…" : [special isEqualToString: @"archive"] ? @"Archiving…"
+	    : @"Moving…";
 	while ((k = [ke nextObject]) != nil) {
 		long long mbid = [k longLongValue];
 		NSArray *uids = [byMailbox objectForKey: k];
 		[[NSNotificationCenter defaultCenter] postNotificationName: Mail2MessagesChanged object: self
 		    userInfo: [NSDictionary dictionaryWithObject: k forKey: @"Mailbox"]];
-		[self run: [special isEqualToString: @"trash"] ? @"Deleting…" : @"Archiving…" work: ^BOOL (NSString **err) {
+		[self run: what work: ^BOOL (NSString **err) {
 			Mail2Mailbox *mb = [[Mail2Store sharedStore] mailboxWithID: mbid];
 			if (mb == nil || ![imap select: [mb name] uidValidity: NULL uidNext: NULL exists: NULL error: err])
 				return mb == nil;
 			if (destName == nil || mbid == destId) {
 				/* no Trash (or deleting in the Trash): delete for good */
-				if (destName == nil && [special isEqualToString: @"archive"]) {
-					*err = @"This account has no Archive mailbox.";
+				if (destName == nil && ![special isEqualToString: @"trash"]) {
+					*err = [NSString stringWithFormat: @"This account has no %@ mailbox.",
+					    [special isEqualToString: @"junk"] ? @"Junk" : @"Archive"];
 					return NO;
 				}
 				return [imap expungeUids: uids error: err];
@@ -527,6 +556,175 @@ Mail2ClearDockBadge(void)
 	}
 	[destName autorelease];
 	Mail2UpdateDockBadge();
+}
+
+/* ---- rules ---- */
+
+/* On the queue, with mb selected: each message meets the rules in order (Mail2Rules.h); the server first, then the
+ * store. Returns NO only on a connection error. */
+- (BOOL) q_applyRules: (NSArray *)infos inMailbox: (Mail2Mailbox *)mb error: (NSString **)err
+{
+	NSArray *rules = Mail2RulesForAccount([account identifier]);
+	Mail2Store *store = [Mail2Store sharedStore];
+	if ([rules count] == 0)
+		return YES;
+	NSMutableArray *seen = [NSMutableArray array], *flagged = [NSMutableArray array];
+	NSMutableDictionary *moves = [NSMutableDictionary dictionary];	/* destination IMAP name -> uids */
+	NSEnumerator *e = [infos objectEnumerator];
+	Mail2MessageInfo *m;
+	while ((m = [e nextObject]) != nil) {
+		NSEnumerator *re = [rules objectEnumerator];
+		Mail2Rule *r;
+		NSNumber *u = [NSNumber numberWithUnsignedInt: [m uid]];
+		while ((r = [re nextObject]) != nil) {
+			if (![r matches: m account: [account identifier]])
+				continue;
+			NSString *dest = nil;
+			if (r->action == Mail2RuleMarkRead)
+				[seen addObject: u];
+			else if (r->action == Mail2RuleFlag)
+				[flagged addObject: u];
+			else if (r->action == Mail2RuleTrash)
+				dest = [[self mailboxWithSpecial: @"trash"] name];
+			else
+				dest = r->mailbox;
+			if (dest != nil && ![dest isEqualToString: [mb name]]) {
+				NSMutableArray *a = [moves objectForKey: dest];
+				if (a == nil)
+					[moves setObject: (a = [NSMutableArray array]) forKey: dest];
+				[a addObject: u];
+			}
+			if ([r endsRun])
+				break;
+		}
+	}
+	if ([seen count]) {
+		if (![imap setFlags: Mail2FlagSeen add: YES uids: seen error: err])
+			return ![imap isConnected] ? NO : YES;
+		NSDictionary *flags = [store flagsByUidInMailbox: [mb mbid]];
+		e = [seen objectEnumerator];
+		NSNumber *u;
+		while ((u = [e nextObject]) != nil)
+			[store setFlags: [[flags objectForKey: u] intValue] | Mail2FlagSeen forUid: [u unsignedIntValue] inMailbox: [mb mbid]];
+	}
+	if ([flagged count]) {
+		if (![imap setFlags: Mail2FlagFlagged add: YES uids: flagged error: err])
+			return ![imap isConnected] ? NO : YES;
+		NSDictionary *flags = [store flagsByUidInMailbox: [mb mbid]];
+		e = [flagged objectEnumerator];
+		NSNumber *u;
+		while ((u = [e nextObject]) != nil)
+			[store setFlags: [[flags objectForKey: u] intValue] | Mail2FlagFlagged forUid: [u unsignedIntValue] inMailbox: [mb mbid]];
+	}
+	NSEnumerator *de = [moves keyEnumerator];
+	NSString *dest;
+	while ((dest = [de nextObject]) != nil) {
+		NSArray *uids = [moves objectForKey: dest];
+		if (![imap moveUids: uids to: dest error: err]) {
+			if (![imap isConnected])
+				return NO;
+			NSLog(@"mail2: a rule could not move to %@: %@", dest, *err);
+			*err = nil;
+			continue;
+		}
+		[store removeUids: uids inMailbox: [mb mbid]];
+	}
+	if (Mail2Debug() && ([seen count] || [flagged count] || [moves count]))
+		NSLog(@"Mail2: rules: %lu read, %lu flagged, moved to %@", (unsigned long)[seen count], (unsigned long)[flagged count],
+		    [moves allKeys]);
+	return YES;
+}
+
+- (void) applyRulesTo: (NSArray *)msgs
+{
+	NSMutableDictionary *byMailbox = [NSMutableDictionary dictionary];
+	NSEnumerator *e = [msgs objectEnumerator];
+	Mail2MessageInfo *m;
+	while ((m = [e nextObject]) != nil) {
+		NSNumber *k = [NSNumber numberWithLongLong: [m mbid]];
+		NSMutableArray *a = [byMailbox objectForKey: k];
+		if (a == nil)
+			[byMailbox setObject: (a = [NSMutableArray array]) forKey: k];
+		[a addObject: m];
+	}
+	NSEnumerator *ke = [byMailbox keyEnumerator];
+	NSNumber *k;
+	while ((k = [ke nextObject]) != nil) {
+		NSArray *mine = [[byMailbox objectForKey: k] retain];
+		long long mbid = [k longLongValue];
+		[self run: @"Applying rules…" work: ^BOOL (NSString **err) {
+			Mail2Mailbox *mb = [[Mail2Store sharedStore] mailboxWithID: mbid];
+			BOOL ok = mb == nil || ([imap select: [mb name] uidValidity: NULL uidNext: NULL exists: NULL error: err] &&
+			    [self q_applyRules: mine inMailbox: mb error: err]);
+			[self postMessagesChanged: mbid];
+			return ok;
+		}];
+		[mine autorelease];
+	}
+}
+
+/* ---- mailboxes ---- */
+
+/* the prefix new top-level mailboxes need: "INBOX." on servers whose folders all live under the Inbox */
+- (NSString *) q_newMailboxPrefix: (char *)delim
+{
+	NSArray *all = [[Mail2Store sharedStore] mailboxesForAccount: [account identifier]];
+	NSEnumerator *e = [all objectEnumerator];
+	Mail2Mailbox *m;
+	char d = '/';
+	BOOL allUnderInbox = YES, any = NO;
+	while ((m = [e nextObject]) != nil) {
+		if (m->delimiter)
+			d = m->delimiter;
+		if ([[m special] isEqualToString: @"inbox"])
+			continue;
+		any = YES;
+		if (![[[m name] uppercaseString] hasPrefix: [NSString stringWithFormat: @"INBOX%c", m->delimiter ? m->delimiter : '/']])
+			allUnderInbox = NO;
+	}
+	*delim = d;
+	return any && allUnderInbox ? [NSString stringWithFormat: @"INBOX%c", d] : @"";
+}
+
+- (void) createMailboxNamed: (NSString *)display
+{
+	NSString *n = [display copy];
+	[self run: @"Creating the mailbox…" work: ^BOOL (NSString **err) {
+		char d;
+		NSString *full = [[self q_newMailboxPrefix: &d] stringByAppendingString: Mail2EncodeMailboxName(n)];
+		return [imap createMailbox: full error: err] && [self q_refreshMailboxes: err];
+	}];
+	[n autorelease];
+}
+
+- (void) renameMailbox: (Mail2Mailbox *)mb to: (NSString *)display
+{
+	if (mb == nil || [mb special] != nil)
+		return;
+	NSString *old = [[mb name] copy];
+	char delim = mb->delimiter;
+	NSString *n = [display copy];
+	[self run: @"Renaming the mailbox…" work: ^BOOL (NSString **err) {
+		/* the same parent, a new last component */
+		NSRange r = delim ? [old rangeOfString: [NSString stringWithFormat: @"%c", delim] options: NSBackwardsSearch]
+		                  : NSMakeRange(NSNotFound, 0);
+		NSString *parent = r.location != NSNotFound ? [old substringToIndex: r.location + 1] : @"";
+		return [imap renameMailbox: old to: [parent stringByAppendingString: Mail2EncodeMailboxName(n)] error: err] &&
+		    [self q_refreshMailboxes: err];
+	}];
+	[old autorelease];
+	[n autorelease];
+}
+
+- (void) deleteMailbox: (Mail2Mailbox *)mb
+{
+	if (mb == nil || [mb special] != nil)
+		return;
+	NSString *old = [[mb name] copy];
+	[self run: @"Deleting the mailbox…" work: ^BOOL (NSString **err) {
+		return [imap deleteMailbox: old error: err] && [self q_refreshMailboxes: err];
+	}];
+	[old autorelease];
 }
 
 /* ---- older mail, search, drafts ---- */

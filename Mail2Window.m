@@ -69,6 +69,8 @@ tool_button(NSString *icon, NSString *tip, id target, SEL action, NSRect r)
 	[t setSidebarStyle: sb];
 	[t setDataSource: (id)self];
 	[t setDelegate: (id)self];
+	if (sb)
+		[t registerForDraggedTypes: [NSArray arrayWithObject: @"Mail2MessageRows"]];
 	return t;
 }
 
@@ -798,6 +800,12 @@ scroller_for(NSTableView *t, NSRect r)
 		    ![[current special] isEqualToString: @"all"];
 	if (a == @selector(deleteMessages:) || a == @selector(toggleFlag:) || a == @selector(toggleRead:))
 		return [[self selectedMessages] count] > 0;
+	if (a == @selector(moveTo:) || a == @selector(markJunk:) || a == @selector(applyRules:))
+		return [[self selectedMessages] count] > 0;
+	if (a == @selector(renameMailbox:) || a == @selector(deleteMailbox:))
+		return [self currentIsOwnFolder];
+	if (a == @selector(newMailbox:))
+		return [sessions count] > 0;
 	if (a == @selector(getOlderMessages:))
 		return current != nil && ![self showingAllInboxes] && !loadingOlder && [[self currentSession] hasOlderMessagesIn: current];
 	if (a == @selector(editDraft:))
@@ -926,6 +934,197 @@ scroller_for(NSTableView *t, NSRect r)
 	[self removeSelectedThen: ^(NSArray *msgs) {
 		[self eachSession: msgs do: ^(Mail2Session *s, NSArray *mine) { [s moveMessages: mine toSpecial: @"trash"]; }];
 	}];
+}
+
+/* ---- moving and folders ---- */
+
+/* the selected messages' account, when they all have the same one */
+- (Mail2Session *) sessionOfSelection
+{
+	Mail2Session *one = nil;
+	NSEnumerator *e = [[self actionMessages] objectEnumerator];
+	Mail2MessageInfo *m;
+	while ((m = [e nextObject]) != nil) {
+		Mail2Session *s = [self sessionForMessage: m];
+		if (one != nil && s != one)
+			return nil;
+		one = s;
+	}
+	return one;
+}
+
+- (void) moveTo: (id)sender
+{
+	Mail2Session *s = [self sessionOfSelection];
+	if (s == nil) {
+		if ([[self selectedMessages] count])
+			NSRunAlertPanel(@"Move To", @"The messages are in different accounts: move them from each account's own mailbox.",
+			    @"OK", nil, nil);
+		return;
+	}
+	NSMutableArray *boxes = [NSMutableArray array];
+	NSEnumerator *e = [[[Mail2Store sharedStore] mailboxesForAccount: [[s account] identifier]] objectEnumerator];
+	Mail2Mailbox *m;
+	while ((m = [e nextObject]) != nil)
+		if ([m selectable] && [m mbid] != [current mbid])
+			[boxes addObject: m];
+	unsigned long n = (unsigned long)[[self actionMessages] count];
+	Mail2Mailbox *dest = Mail2ChooseMailbox(@"Move To", [NSString stringWithFormat: n == 1 ? @"Move the message to:"
+	    : @"Move the %lu messages to:", n], boxes, @"Move");
+	if (dest != nil)
+		[self removeSelectedThen: ^(NSArray *msgs) { [s moveMessages: msgs toMailbox: dest]; }];
+}
+
+- (void) applyRules: (id)sender
+{
+	[self eachSession: [self actionMessages] do: ^(Mail2Session *s, NSArray *mine) { [s applyRulesTo: mine]; }];
+}
+
+/* Junk; in the Junk mailbox, "not junk" back to the Inbox */
+- (void) markJunk: (id)sender
+{
+	BOOL inJunk = [[current special] isEqualToString: @"junk"];
+	__block BOOL missing = NO;
+	[self eachSession: [self actionMessages] do: ^(Mail2Session *s, NSArray *mine) {
+		if ([s mailboxWithSpecial: inJunk ? @"inbox" : @"junk"] == nil)
+			missing = YES;
+	}];
+	if (missing) {
+		NSRunAlertPanel(@"No Junk Mailbox", @"The account has no Junk mailbox.", @"OK", nil, nil);
+		return;
+	}
+	[self removeSelectedThen: ^(NSArray *msgs) {
+		[self eachSession: msgs do: ^(Mail2Session *s, NSArray *mine) {
+			if (inJunk)
+				[s moveMessages: mine toMailbox: [s mailboxWithSpecial: @"inbox"]];
+			else
+				[s moveMessages: mine toSpecial: @"junk"];
+		}];
+	}];
+}
+
+- (void) newMailbox: (id)sender
+{
+	Mail2Session *s = [self showingAllInboxes] || current == nil ? ([sessions count] ? [sessions objectAtIndex: 0] : nil)
+	                                                             : [self currentSession];
+	if (s == nil)
+		return;
+	NSString *name = Mail2AskString(@"New Mailbox", [NSString stringWithFormat: @"A new mailbox in %@:", [[s account] email]],
+	    @"", @"Create");
+	if (name != nil)
+		[s createMailboxNamed: name];
+}
+
+- (BOOL) currentIsOwnFolder
+{
+	return current != nil && ![self showingAllInboxes] && [current special] == nil;
+}
+
+- (void) renameMailbox: (id)sender
+{
+	if (![self currentIsOwnFolder])
+		return;
+	NSString *name = Mail2AskString(@"Rename Mailbox", [NSString stringWithFormat: @"Rename “%@” to:", [current displayName]],
+	    [current displayName], @"Rename");
+	if (name != nil && ![name isEqualToString: [current displayName]])
+		[[self currentSession] renameMailbox: current to: name];
+}
+
+- (void) deleteMailbox: (id)sender
+{
+	if (![self currentIsOwnFolder])
+		return;
+	if (NSRunAlertPanel(@"Delete Mailbox?", @"Delete “%@” and every message in it, on the server too? This cannot be undone.",
+	    @"Delete", @"Cancel", nil, [current displayName]) != NSAlertDefaultReturn)
+		return;
+	[[self currentSession] deleteMailbox: current];
+}
+
+/* ---- drag messages onto a mailbox ---- */
+
+#define MAIL2_MESSAGES_TYPE @"Mail2MessageRows"
+
+- (BOOL) tableView: (NSTableView *)t writeRowsWithIndexes: (NSIndexSet *)rows toPasteboard: (NSPasteboard *)pb
+{
+	if (t != list)
+		return NO;
+	NSMutableArray *ids = [NSMutableArray array];
+	NSUInteger i;
+	for (i = [rows firstIndex]; i != NSNotFound; i = [rows indexGreaterThanIndex: i])
+		if (i < [messages count])
+			[ids addObject: [NSNumber numberWithLongLong: [[messages objectAtIndex: i] rowid]]];
+	if ([ids count] == 0)
+		return NO;
+	/* dragging part of the selection drags all of it (and a closed conversation all its messages), as in Apple Mail */
+	if ([[list selectedRowIndexes] containsIndexes: rows]) {
+		[ids removeAllObjects];
+		NSEnumerator *e = [[self actionMessages] objectEnumerator];
+		Mail2MessageInfo *m;
+		while ((m = [e nextObject]) != nil)
+			[ids addObject: [NSNumber numberWithLongLong: [m rowid]]];
+	}
+	[pb declareTypes: [NSArray arrayWithObject: MAIL2_MESSAGES_TYPE] owner: nil];
+	return [pb setPropertyList: ids forType: MAIL2_MESSAGES_TYPE];
+}
+
+/* the older form of the same, which some versions of gnustep-gui call */
+- (BOOL) tableView: (NSTableView *)t writeRows: (NSArray *)rows toPasteboard: (NSPasteboard *)pb
+{
+	NSMutableIndexSet *set = [NSMutableIndexSet indexSet];
+	NSEnumerator *e = [rows objectEnumerator];
+	NSNumber *n;
+	while ((n = [e nextObject]) != nil)
+		[set addIndex: [n unsignedIntegerValue]];
+	return [self tableView: t writeRowsWithIndexes: set toPasteboard: pb];
+}
+
+- (NSArray *) draggedMessages: (id <NSDraggingInfo>)info
+{
+	NSArray *ids = [[info draggingPasteboard] propertyListForType: MAIL2_MESSAGES_TYPE];
+	NSMutableArray *r = [NSMutableArray array];
+	NSEnumerator *e = [ids objectEnumerator];
+	NSNumber *n;
+	while ((n = [e nextObject]) != nil) {
+		Mail2MessageInfo *m = [[Mail2Store sharedStore] messageWithRowID: [n longLongValue]];
+		if (m != nil)
+			[r addObject: m];
+	}
+	return r;
+}
+
+- (NSDragOperation) tableView: (NSTableView *)t validateDrop: (id <NSDraggingInfo>)info proposedRow: (NSInteger)row
+       proposedDropOperation: (NSTableViewDropOperation)op
+{
+	if (t != sidebar || row < 0 || row >= (NSInteger)[sidebarItems count])
+		return NSDragOperationNone;
+	id it = [sidebarItems objectAtIndex: row];
+	if (![it isKindOfClass: [Mail2Mailbox class]] || ![it selectable] || [it mbid] == Mail2AllInboxesID)
+		return NSDragOperationNone;
+	NSArray *msgs = [self draggedMessages: info];
+	if ([msgs count] == 0)
+		return NSDragOperationNone;
+	/* within one account: IMAP moves inside a server */
+	NSEnumerator *e = [msgs objectEnumerator];
+	Mail2MessageInfo *m;
+	while ((m = [e nextObject]) != nil)
+		if (![[[[Mail2Store sharedStore] mailboxWithID: [m mbid]] account] isEqualToString: [it account]] || [m mbid] == [it mbid])
+			return NSDragOperationNone;
+	[t setDropRow: row dropOperation: NSTableViewDropOn];
+	return NSDragOperationMove;
+}
+
+- (BOOL) tableView: (NSTableView *)t acceptDrop: (id <NSDraggingInfo>)info row: (NSInteger)row
+     dropOperation: (NSTableViewDropOperation)op
+{
+	if ([self tableView: t validateDrop: info proposedRow: row proposedDropOperation: op] == NSDragOperationNone)
+		return NO;
+	Mail2Mailbox *dest = [sidebarItems objectAtIndex: row];
+	NSArray *msgs = [self draggedMessages: info];
+	Mail2Session *s = [self sessionForAccount: [dest account]];
+	[s moveMessages: msgs toMailbox: dest];
+	[self reloadMessages];
+	[self showSelection];
+	return YES;
 }
 
 - (void) toggleFlag: (id)sender

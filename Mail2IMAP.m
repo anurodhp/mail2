@@ -342,6 +342,42 @@ uids_from_search(clist *res)
 	return r;
 }
 
+- (BOOL) renameMailbox: (NSString *)from to: (NSString *)to error: (NSString **)err
+{
+	int rc;
+	if (![self connect: err])
+		return NO;
+	if ([selected isEqualToString: from]) {	/* not while it is selected */
+		mailimap_close(IMAP);
+		DESTROY(selected);
+	}
+	rc = mailimap_rename(IMAP, [from UTF8String], [to UTF8String]);
+	if (rc != MAILIMAP_NO_ERROR) {
+		*err = imap_error(IMAP, rc, @"Renaming the mailbox");
+		[self failed: rc];
+		return NO;
+	}
+	return YES;
+}
+
+- (BOOL) deleteMailbox: (NSString *)name error: (NSString **)err
+{
+	int rc;
+	if (![self connect: err])
+		return NO;
+	if ([selected isEqualToString: name]) {
+		mailimap_close(IMAP);
+		DESTROY(selected);
+	}
+	rc = mailimap_delete(IMAP, [name UTF8String]);
+	if (rc != MAILIMAP_NO_ERROR) {
+		*err = imap_error(IMAP, rc, @"Deleting the mailbox");
+		[self failed: rc];
+		return NO;
+	}
+	return YES;
+}
+
 - (BOOL) createMailbox: (NSString *)name error: (NSString **)err
 {
 	int rc;

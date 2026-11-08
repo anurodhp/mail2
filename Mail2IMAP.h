@@ -19,6 +19,8 @@
 - (BOOL) hasCapability: (NSString *)cap;
 
 - (BOOL) createMailbox: (NSString *)name error: (NSString **)err;
+- (BOOL) renameMailbox: (NSString *)from to: (NSString *)to error: (NSString **)err;
+- (BOOL) deleteMailbox: (NSString *)name error: (NSString **)err;
 /* every mailbox: dictionaries {Name, Delimiter, Special, Selectable} as Mail2Store -setMailboxes:forAccount: takes */
 - (NSArray *) listMailboxes: (NSString **)err;
 - (BOOL) select: (NSString *)mailbox uidValidity: (unsigned *)v uidNext: (unsigned *)n exists: (unsigned *)exists error: (NSString **)err;

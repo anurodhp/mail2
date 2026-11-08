@@ -80,6 +80,10 @@ Class Mail2WebViewClass(void);
 BOOL Mail2WebViewInstalled(void);	/* the library is there (and has not failed): cheap, any thread */
 
 
+/* small modal questions: a name (nil if cancelled), and one of the mailboxes (nil if cancelled) */
+NSString *Mail2AskString(NSString *title, NSString *message, NSString *initial, NSString *okTitle);
+Mail2Mailbox *Mail2ChooseMailbox(NSString *title, NSString *message, NSArray *mailboxes, NSString *okTitle);
+
 /* tail-truncated attributed string with Milan's font fallback */
 NSAttributedString *Mail2FittedString(NSString *s, NSDictionary *attrs, CGFloat width);
 NSImage *Mail2Icon(NSString *name);

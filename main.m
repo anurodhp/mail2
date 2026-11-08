@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #import "Mail2Account.h"
 #import "Mail2AccountPanel.h"
+#import "Mail2RulesWindow.h"
 #import "Mail2Compose.h"
 #import "Mail2Session.h"
 #import "Mail2Store.h"
@@ -63,6 +64,7 @@ responder_name(id r)
 	NSMutableArray *sessions;
 	Mail2Window *viewer;
 	Mail2AccountsWindow *accountsWindow;
+	Mail2RulesWindow *rulesWindow;
 }
 @end
 
@@ -249,7 +251,7 @@ static NSString *volatile heartbeatMode;
 	NSDictionary *opts = [NSDictionary dictionaryWithObjectsAndKeys:
 	    @"Mail2", @"ApplicationName",
 	    @"A small IMAP mail client for GNUstep.", @"ApplicationDescription",
-	    @"0.3", @"ApplicationRelease",
+	    @"0.4", @"ApplicationRelease",
 	    [NSArray arrayWithObject: @"Anurodh Pokharel"], @"Authors",
 	    @"Copyright © 2026 Anurodh Pokharel. MIT license.", @"Copyright",
 	    @"Mail by libetpan 1.9.4 (BSD), SQLite 3.44 (public domain) and Mbed TLS 3.6 (Apache-2.0). Icons from Lucide (ISC).",
@@ -271,6 +273,20 @@ static NSString *volatile heartbeatMode;
 - (void) focusSearch: (id)s { [viewer focusSearch: s]; }
 - (void) toggleConversations: (id)s { [viewer toggleConversations: s]; }
 - (void) editDraft: (id)s { [viewer editDraft: s]; }
+- (void) moveTo: (id)s { [viewer moveTo: s]; }
+- (void) applyRules: (id)s { [viewer applyRules: s]; }
+
+- (void) showRules: (id)sender
+{
+	if (rulesWindow == nil)
+		rulesWindow = [[Mail2RulesWindow alloc] initWithAccounts: accounts];
+	[rulesWindow setAccounts: accounts];
+	[rulesWindow show];
+}
+- (void) markJunk: (id)s { [viewer markJunk: s]; }
+- (void) newMailbox: (id)s { [viewer newMailbox: s]; }
+- (void) renameMailbox: (id)s { [viewer renameMailbox: s]; }
+- (void) deleteMailbox: (id)s { [viewer deleteMailbox: s]; }
 
 - (BOOL) validateMenuItem: (NSMenuItem *)i
 {
@@ -296,6 +312,7 @@ static NSString *volatile heartbeatMode;
 	add_item(m, @"About Mail2", @selector(showAbout:), nil, self);
 	add_item(m, @"Accounts…", @selector(showAccounts:), @",", self);
 	add_item(m, @"Add Account…", @selector(addAccount:), nil, self);
+	add_item(m, @"Rules…", @selector(showRules:), nil, self);
 	add_item(m, @"Hide Mail2", @selector(hide:), @"h", NSApp);
 	add_item(m, @"Quit Mail2", @selector(terminate:), @"q", NSApp);
 	[main setSubmenu: m forItem: add_item(main, @"Mail2", NULL, nil, nil)]; [m release];
@@ -324,6 +341,10 @@ static NSString *volatile heartbeatMode;
 	m = [[NSMenu alloc] initWithTitle: @"Mailbox"];
 	it = add_item(m, @"Get All New Mail", @selector(getMail:), @"N", self);
 	add_item(m, @"Get Older Messages", @selector(getOlderMessages:), nil, self);
+	[m addItem: [NSMenuItem separatorItem]];
+	add_item(m, @"New Mailbox…", @selector(newMailbox:), nil, self);
+	add_item(m, @"Rename Mailbox…", @selector(renameMailbox:), nil, self);
+	add_item(m, @"Delete Mailbox…", @selector(deleteMailbox:), nil, self);
 	[main setSubmenu: m forItem: add_item(main, @"Mailbox", NULL, nil, nil)]; [m release];
 
 	m = [[NSMenu alloc] initWithTitle: @"Message"];
@@ -333,6 +354,9 @@ static NSString *volatile heartbeatMode;
 	add_item(m, @"Forward", @selector(forward:), @"F", self);
 	add_item(m, @"Archive", @selector(archive:), @"A", self);
 	add_item(m, @"Move to Trash", @selector(deleteMessages:), nil, self);
+	add_item(m, @"Move To…", @selector(moveTo:), @"M", self);
+	add_item(m, @"Mark as Junk", @selector(markJunk:), @"J", self);
+	add_item(m, @"Apply Rules", @selector(applyRules:), nil, self);
 	add_item(m, @"Mark as Read/Unread", @selector(toggleRead:), @"U", self);
 	add_item(m, @"Flag/Unflag", @selector(toggleFlag:), @"L", self);
 	[main setSubmenu: m forItem: add_item(main, @"Message", NULL, nil, nil)]; [m release];

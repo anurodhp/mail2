@@ -46,6 +46,12 @@
 - (void) focusSearch: (id)sender;
 - (void) toggleConversations: (id)sender;
 - (void) editDraft: (id)sender;
+- (void) moveTo: (id)sender;
+- (void) markJunk: (id)sender;
+- (void) applyRules: (id)sender;
+- (void) newMailbox: (id)sender;
+- (void) renameMailbox: (id)sender;
+- (void) deleteMailbox: (id)sender;
 + (BOOL) organizesByConversation;
 - (BOOL) validateAction: (SEL)a;
 @end

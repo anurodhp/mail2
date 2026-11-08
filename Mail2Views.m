@@ -729,3 +729,84 @@ KEY_ORDER_METHODS
 @implementation Mail2KeyOrderPanel
 KEY_ORDER_METHODS
 @end
+
+/* ---- small questions ---- */
+
+@interface Mail2Asker : NSObject
+@end
+@implementation Mail2Asker
+- (void) ok: (id)s { [NSApp stopModalWithCode: NSOKButton]; }
+- (void) cancel: (id)s { [NSApp stopModalWithCode: NSCancelButton]; }
+@end
+
+/* a panel with a line of text, a control, Cancel and OK; runs it modally */
+static NSInteger
+run_question(NSString *title, NSString *message, NSView *control, NSString *okTitle)
+{
+	NSRect v = [[NSScreen mainScreen] visibleFrame];
+	NSRect r = NSMakeRect(floor(NSMidX(v) - 200), floor(NSMidY(v)), 400, 132);
+	NSPanel *p = [[NSPanel alloc] initWithContentRect: r styleMask: NSTitledWindowMask backing: NSBackingStoreBuffered defer: NO];
+	Mail2Asker *a = [[Mail2Asker alloc] init];
+	[p setTitle: title];
+	[p setHidesOnDeactivate: NO];
+	NSView *cv = [p contentView];
+	NSTextField *l = [[[NSTextField alloc] initWithFrame: NSMakeRect(16, 96, 368, 20)] autorelease];
+	[l setStringValue: message];
+	[l setEditable: NO];
+	[l setSelectable: NO];
+	[l setBezeled: NO];
+	[l setDrawsBackground: NO];
+	[cv addSubview: l];
+	[control setFrame: NSMakeRect(16, 60, 368, 26)];
+	[cv addSubview: control];
+	NSButton *ok = [[[NSButton alloc] initWithFrame: NSMakeRect(292, 12, 92, 28)] autorelease];
+	[ok setTitle: okTitle ? okTitle : @"OK"];
+	[ok setBezelStyle: NSRoundedBezelStyle];
+	[ok setKeyEquivalent: @"\r"];
+	[ok setTarget: a];
+	[ok setAction: @selector(ok:)];
+	[cv addSubview: ok];
+	NSButton *cancel = [[[NSButton alloc] initWithFrame: NSMakeRect(194, 12, 92, 28)] autorelease];
+	[cancel setTitle: @"Cancel"];
+	[cancel setBezelStyle: NSRoundedBezelStyle];
+	[cancel setKeyEquivalent: @"\e"];
+	[cancel setTarget: a];
+	[cancel setAction: @selector(cancel:)];
+	[cv addSubview: cancel];
+	[NSApp activateIgnoringOtherApps: YES];
+	[p makeKeyAndOrderFront: nil];
+	[p makeFirstResponder: control];
+	[p display];
+	NSInteger rc = [NSApp runModalForWindow: p];
+	[p orderOut: nil];
+	[p release];
+	[a release];
+	return rc;
+}
+
+NSString *
+Mail2AskString(NSString *title, NSString *message, NSString *initial, NSString *okTitle)
+{
+	NSTextField *f = [[[NSTextField alloc] initWithFrame: NSMakeRect(0, 0, 368, 24)] autorelease];
+	[f setStringValue: initial ? initial : @""];
+	NSInteger rc = run_question(title, message, f, okTitle);
+	NSString *v = [[f stringValue] stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]];
+	return rc == NSOKButton && [v length] ? v : nil;
+}
+
+Mail2Mailbox *
+Mail2ChooseMailbox(NSString *title, NSString *message, NSArray *mailboxes, NSString *okTitle)
+{
+	NSPopUpButton *pop = [[[NSPopUpButton alloc] initWithFrame: NSMakeRect(0, 0, 368, 26) pullsDown: NO] autorelease];
+	NSEnumerator *e = [mailboxes objectEnumerator];
+	Mail2Mailbox *m;
+	while ((m = [e nextObject]) != nil) {
+		NSString *indent = [@"" stringByPaddingToLength: (NSUInteger)[m depth] * 3 withString: @" " startingAtIndex: 0];
+		[pop addItemWithTitle: [NSString stringWithFormat: @"%@%@", indent, [m displayName]]];
+		[[pop lastItem] setRepresentedObject: m];
+	}
+	if ([mailboxes count] == 0)
+		return nil;
+	NSInteger rc = run_question(title, message, pop, okTitle);
+	return rc == NSOKButton ? [[pop selectedItem] representedObject] : nil;
+}

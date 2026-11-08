@@ -9,6 +9,7 @@
 #import "Mail2Session.h"
 #import "Mail2Util.h"
 #import "Mail2OAuth.h"
+#import "Mail2Rules.h"
 #include <mbedtls/sha256.h>
 #include "Mail2TLS.h"
 #include <libetpan/mailstream.h>
@@ -603,6 +604,124 @@ main(void)
 	CHECK(Mail2HTMLHasRemoteContent(@"<img SRC = //cdn.example.com/a.png>"), "protocol-relative, odd spacing and case");
 	CHECK(!Mail2HTMLHasRemoteContent(@"<img src=\"cid:part1@x\"><a href=\"https://example.com\">a link</a>"),
 	    "inline images and links are not remote content");
+
+	printf("Folders and moving\n");
+	{
+		NSString *names[] = { @"Reçus", @"Projects & Plans", @"日本語", @"a/b" };
+		unsigned k;
+		BOOL round = YES;
+		for (k = 0; k < 4; k++)
+			round = round && [Mail2DecodeMailboxName([Mail2EncodeMailboxName(names[k]) UTF8String]) isEqualToString: names[k]];
+		CHECK(round && [Mail2EncodeMailboxName(@"Reçus") isEqualToString: @"Re&AOc-us"] &&
+		    [Mail2EncodeMailboxName(@"A&B") isEqualToString: @"A&-B"], "mailbox names to modified UTF-7 and back (%@)",
+		    Mail2EncodeMailboxName(@"日本語"));
+		Mail2Session *fs = [[Mail2Session alloc] initWithAccount: a1];
+		[fs refreshMailboxes];
+		wait_for(^BOOL { return ![fs isBusy]; }, 20);
+		[fs createMailboxNamed: @"Reçus 2026"];
+		wait_for(^BOOL { return ![fs isBusy]; }, 20);
+		Mail2Mailbox *made = nil, *mb;
+		NSEnumerator *me = [[store mailboxesForAccount: @"test1@localhost"] objectEnumerator];
+		while ((mb = [me nextObject]) != nil)
+			if ([[mb displayName] isEqualToString: @"Reçus 2026"])
+				made = mb;
+		CHECK(made != nil, "New Mailbox: “Reçus 2026” on the server (%@) %@", [made name], [fs lastError] ? [fs lastError] : @"");
+		Mail2Mailbox *ib = [fs mailboxWithSpecial: @"inbox"];
+		[fs syncMailbox: ib];
+		wait_for(^BOOL { return ![fs isBusy]; }, 20);
+		NSArray *two = [store messagesInMailbox: [ib mbid] limit: 2];
+		NSUInteger inboxBefore = [[store messagesInMailbox: [ib mbid] limit: 1000] count];
+		if (made != nil && [two count] == 2) {
+			[fs moveMessages: two toMailbox: made];
+			CHECK([[store messagesInMailbox: [ib mbid] limit: 1000] count] == inboxBefore - 2, "Move To: gone from the Inbox at once");
+			wait_for(^BOOL { return ![fs isBusy]; }, 20);
+			CHECK([[store messagesInMailbox: [made mbid] limit: 100] count] == 2, "and in the folder after its sync (%@)",
+			    [fs lastError] ? [fs lastError] : @"");
+		}
+		[fs renameMailbox: made to: @"Archive 2026"];
+		wait_for(^BOOL { return ![fs isBusy]; }, 20);
+		Mail2Mailbox *renamed = nil;
+		me = [[store mailboxesForAccount: @"test1@localhost"] objectEnumerator];
+		while ((mb = [me nextObject]) != nil)
+			if ([[mb displayName] isEqualToString: @"Archive 2026"])
+				renamed = mb;
+		CHECK(renamed != nil && [store mailboxWithID: [made mbid]] == nil, "Rename Mailbox (%@)", [fs lastError] ? [fs lastError] : @"");
+		[fs deleteMailbox: renamed];
+		wait_for(^BOOL { return ![fs isBusy]; }, 20);
+		BOOL gone = YES;
+		me = [[store mailboxesForAccount: @"test1@localhost"] objectEnumerator];
+		while ((mb = [me nextObject]) != nil)
+			if ([[mb displayName] isEqualToString: @"Archive 2026"])
+				gone = NO;
+		CHECK(renamed != nil && gone, "Delete Mailbox");
+		CHECK([fs mailboxWithSpecial: @"junk"] == nil, "(GreenMail has no Junk mailbox)");
+		NSArray *one = [store messagesInMailbox: [ib mbid] limit: 1];
+		NSUInteger have = [[store messagesInMailbox: [ib mbid] limit: 1000] count];
+		[fs moveMessages: one toSpecial: @"junk"];
+		wait_for(^BOOL { return ![fs isBusy]; }, 20);
+		CHECK([[fs lastError] rangeOfString: @"no Junk"].location != NSNotFound &&
+		    [[store messagesInMailbox: [ib mbid] limit: 1000] count] == have,
+		    "Junk without a Junk mailbox says so and keeps the message: %@", [fs lastError]);
+		[fs release];
+	}
+
+	printf("Rules\n");
+	{
+		Mail2MessageInfo *probe = [[[Mail2MessageInfo alloc] init] autorelease];
+		probe->fromName = [@"Ann Éxample" retain];
+		probe->fromAddr = [@"ann@example.com" retain];
+		probe->subject = [@"Weekly NEWSLETTER" retain];
+		Mail2Rule *r1 = [Mail2Rule ruleWithPlist: [NSDictionary dictionaryWithObjectsAndKeys: @"newsletter", @"Contains",
+		    [NSNumber numberWithInt: Mail2RuleSubject], @"Field", [NSNumber numberWithInt: Mail2RuleMarkRead], @"Action", nil]];
+		Mail2Rule *r2 = [Mail2Rule ruleWithPlist: [NSDictionary dictionaryWithObjectsAndKeys: @"ann exa", @"Contains",
+		    [NSNumber numberWithInt: Mail2RuleFrom], @"Field", nil]];
+		Mail2Rule *r3 = [Mail2Rule ruleWithPlist: [NSDictionary dictionaryWithObjectsAndKeys: @"newsletter", @"Contains",
+		    @"other@localhost", @"Account", nil]];
+		CHECK([r1 matches: probe account: @"test1@localhost"] && [r2 matches: probe account: @"test1@localhost"] &&
+		    ![r3 matches: probe account: @"test1@localhost"], "matching: case and accents ignored, per account");
+
+		/* a folder, rules for it, then new mail through a sync */
+		Mail2Session *rs = [[Mail2Session alloc] initWithAccount: a1];
+		[rs refreshMailboxes];
+		wait_for(^BOOL { return ![rs isBusy]; }, 20);
+		[rs createMailboxNamed: @"Lists"];
+		wait_for(^BOOL { return ![rs isBusy]; }, 20);
+		Mail2Mailbox *lists = nil, *mb;
+		NSEnumerator *me = [[store mailboxesForAccount: @"test1@localhost"] objectEnumerator];
+		while ((mb = [me nextObject]) != nil)
+			if ([[mb displayName] isEqualToString: @"Lists"])
+				lists = mb;
+		NSArray *ruleList = [NSArray arrayWithObjects:
+		    [Mail2Rule ruleWithPlist: [NSDictionary dictionaryWithObjectsAndKeys: @"digest", @"Contains",
+		        [NSNumber numberWithInt: Mail2RuleSubject], @"Field", [NSNumber numberWithInt: Mail2RuleMove], @"Action",
+		        [lists name], @"Mailbox", @"test1@localhost", @"Account", nil]],
+		    [Mail2Rule ruleWithPlist: [NSDictionary dictionaryWithObjectsAndKeys: @"fyi", @"Contains",
+		        [NSNumber numberWithInt: Mail2RuleAny], @"Field", [NSNumber numberWithInt: Mail2RuleMarkRead], @"Action", nil]], nil];
+		CHECK([Mail2Rule saveRules: ruleList] && [[Mail2Rule loadRules] count] == 2, "rules saved and read back");
+		Mail2Mailbox *ib = [rs mailboxWithSpecial: @"inbox"];
+		[rs syncMailbox: ib];
+		wait_for(^BOOL { return ![rs isBusy]; }, 20);
+		NSString *subj[] = { @"Daily digest #12", @"FYI: the plan" };
+		unsigned k;
+		for (k = 0; k < 2; k++) {
+			NSData *r = Mail2BuildMessage(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, subj[k], @"x", nil, nil);
+			Mail2SendMessage(a2, r, [NSArray arrayWithObject: @"test1@localhost"], &err);
+		}
+		BOOL done = wait_for(^BOOL {
+			[rs syncMailbox: ib];
+			wait_for(^BOOL { return ![rs isBusy]; }, 10);
+			NSArray *in = [store searchMailbox: [ib mbid] text: @"FYI" alsoUids: nil limit: 5];
+			return [in count] == 1;
+		}, 30);
+		NSArray *fyi = [store searchMailbox: [ib mbid] text: @"FYI" alsoUids: nil limit: 5];
+		CHECK(done && [fyi count] == 1 && ![[fyi objectAtIndex: 0] isUnread], "new mail: “FYI” marked read by a rule");
+		CHECK([[store searchMailbox: [ib mbid] text: @"digest" alsoUids: nil limit: 5] count] == 0, "“digest” left the Inbox");
+		[rs syncMailbox: lists];
+		wait_for(^BOOL { return ![rs isBusy]; }, 20);
+		CHECK([[store searchMailbox: [lists mbid] text: @"digest" alsoUids: nil limit: 5] count] == 1, "and is in Lists");
+		[Mail2Rule saveRules: [NSArray array]];
+		[rs release];
+	}
 
 	printf("\n%d checks, %d failed\n", checks, failures);
 	[pool release];

@@ -17,6 +17,8 @@ NSString *Mail2SupportDirectory(void);
 NSString *Mail2DecodeHeader(const char *s);
 /* An IMAP mailbox name (modified UTF-7, RFC 3501 5.1.3) as a string. */
 NSString *Mail2DecodeMailboxName(const char *s);
+/* and back: a name as IMAP wants it (printable ASCII as is, "&" as "&-", the rest as &...- modified base64) */
+NSString *Mail2EncodeMailboxName(NSString *s);
 /* A header value for an outgoing message: unchanged if ASCII, else RFC 2047 encoded words (UTF-8, base64). */
 NSString *Mail2EncodeHeader(NSString *s);
 

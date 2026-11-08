@@ -49,6 +49,15 @@ extern NSString *const Mail2StatusChanged;
 /* special: "trash" or "archive" (falls back to Gmail's All Mail for archive); deleting in the Trash itself
  * removes for good */
 - (void) moveMessages: (NSArray *)msgs toSpecial: (NSString *)special;
+/* to one of this account's mailboxes (Move To, a drop on the sidebar) */
+- (void) moveMessages: (NSArray *)msgs toMailbox: (Mail2Mailbox *)dest;
+/* folders: a new one at the top (under INBOX. on servers that keep them there), and renaming or deleting one of the
+ * user's own (never a special mailbox) */
+- (void) createMailboxNamed: (NSString *)name;
+- (void) renameMailbox: (Mail2Mailbox *)mb to: (NSString *)name;
+- (void) deleteMailbox: (Mail2Mailbox *)mb;
+/* the rules (Mail2Rules.h) on these messages now: Message > Apply Rules */
+- (void) applyRulesTo: (NSArray *)msgs;
 /* sends, then saves a copy in Sent (not on Gmail, whose server does that); completion on the main thread */
 - (void) sendMessage: (NSData *)raw recipients: (NSArray *)rcpts replyingTo: (Mail2MessageInfo *)orig
           completion: (void (^)(NSString *err))done;

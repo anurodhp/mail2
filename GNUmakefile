@@ -8,7 +8,7 @@ include $(GNUSTEP_MAKEFILES)/common.make
 APP_NAME = Mail2
 VERSION = 0.1
 Mail2_OBJC_FILES = main.m Mail2Util.m Mail2Account.m Mail2Store.m Mail2IMAP.m Mail2SMTP.m Mail2Message.m \
-	Mail2Session.m Mail2Views.m Mail2Window.m Mail2Compose.m Mail2AccountPanel.m Mail2OAuth.m MilanText.m
+	Mail2Session.m Mail2Views.m Mail2Window.m Mail2Compose.m Mail2AccountPanel.m Mail2OAuth.m Mail2Rules.m Mail2RulesWindow.m MilanText.m
 Mail2_C_FILES = Mail2TLS.c
 Mail2_MAIN_MODEL_FILE =
 Mail2_APPLICATION_ICON = Mail2.tiff

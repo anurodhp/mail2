@@ -6,9 +6,9 @@
 
 ## Status
 
-As of November 8, 2026 (version 0.3):
+As of November 8, 2026 (version 0.4):
 
-- **Works, tested against a real IMAP/SMTP server** (GreenMail, natively on the Mac, 89 checks in `tests/`): TLS with certificate checks, login, mailbox list with the special mailboxes found, the first sync and later ones, new mail pushed through IDLE, reading (plain text, HTML as text, attachments), read/unread and flags both ways, archive and delete (MOVE, or COPY + EXPUNGE), sending with SMTP (AUTH PLAIN/LOGIN), the Sent copy, the Maildir files and the index; and since 0.2 sending files (binary and non-ASCII names round trip), conversations (References), local and server search, fetching mail older than the first sync, and drafts saved, replaced and removed on the server; since 0.3 All Inboxes across two accounts, and OAuth: XOAUTH2 logins to IMAP and SMTP, token refresh (with Microsoft's refresh-token rotation), the device-code flow, the browser flow with PKCE, a revoked sign-in and Cancel, against a stand-in for the providers (`tests/oauth_mock.py`). TLS was also checked against `imap.gmail.com:993`.
+- **Works, tested against a real IMAP/SMTP server** (GreenMail, natively on the Mac, 110 checks in `tests/`): TLS with certificate checks, login, mailbox list with the special mailboxes found, the first sync and later ones, new mail pushed through IDLE, reading (plain text, HTML as text, attachments), read/unread and flags both ways, archive and delete (MOVE, or COPY + EXPUNGE), sending with SMTP (AUTH PLAIN/LOGIN), the Sent copy, the Maildir files and the index; and since 0.2 sending files (binary and non-ASCII names round trip), conversations (References), local and server search, fetching mail older than the first sync, and drafts saved, replaced and removed on the server; since 0.3 All Inboxes across two accounts, and OAuth: XOAUTH2 logins to IMAP and SMTP, token refresh (with Microsoft's refresh-token rotation), the device-code flow, the browser flow with PKCE, a revoked sign-in and Cancel, against a stand-in for the providers (`tests/oauth_mock.py`). TLS was also checked against `imap.gmail.com:993`.
 - **Built for the Pi and run end to end under QEMU** on the real desktop (Window Maker, Naples, Milan): it syncs the Inbox from a server on the host, opens a conversation of three, shows a message and marks it read on the server, updates the dock badge, searches, reopens a draft with its attachment from the server's Drafts and sends it (the server receives it with `plan.pdf`, and Drafts is empty after), and sends a message typed into the compose window (`tools/qemu_shots.sh`, screenshots in `docs/`).
 - **HTML mail in WebKit, under QEMU**: with Florence's engine copied into the image (`FLORENCE_DEPLOY=… tools/qemu_shots.sh`), an HTML message is drawn by WebKit in the message pane (`docs/qemu-html.png`). The first HTML message starts WebKit's processes; under QEMU that held the window for about 17 seconds, once. Not yet measured on the Pi.
 - Things this port taught it: signals interrupt blocking calls on every thread (libetpan's own socket reads gave up on EINTR, so Mail2 has its own stream driver for plain connections too); GNUstep redraws only after an event (Mail2 posts one after background results); and GNUstep's Tab order is not used (the compose window and account panel set their own).
@@ -33,6 +33,9 @@ As of November 8, 2026 (version 0.3):
 - Search (Edit > Find…, Cmd-F, or the field in the toolbar): sender, recipients, subject and the text of every downloaded message (SQLite full-text search), at once; then the server (IMAP SEARCH), which also finds mail older than what was synced.
 - Older mail: scrolling to the end of the list fetches the 100 messages before it, again and again (Mailbox > Get Older Messages too).
 - HTML mail is shown as it was meant to look, in WebKit, when Florence is installed (below); else as text.
+- Move To… (Shift-Cmd-M), or drag messages onto a mailbox in the sidebar (within an account). Mark as Junk (Shift-Cmd-J) moves to Junk; in Junk it moves back to the Inbox.
+- Folders: Mailbox > New Mailbox…, Rename Mailbox…, Delete Mailbox… (your own folders; names in any script, sent as IMAP's modified UTF-7; made under `INBOX.` on servers that keep folders there).
+- Rules (Mail2 > Rules…): if From, To/Cc, Subject or any of them contains a text (case and accents ignored), move to a mailbox, mark as read, flag, or move to the Trash; per account or for all. They run on new Inbox mail, in order, a move ending the run, and Message > Apply Rules runs them on the selection.
 - Archive (Gmail: All Mail), Delete (to the Trash; in the Trash, for good), Mark as Read/Unread, Flag. Changes show at once and reach the server in the background.
 - The unread count of the Inbox on Mail2's icon in Naples' dock.
 - `mailto:` links and `Mail2 mailto:someone@example.com` open a compose window.
@@ -42,7 +45,7 @@ As of November 8, 2026 (version 0.3):
 - No rich text when writing: messages are plain text.
 - Remote content in HTML mail (images and styles from the web) is not loaded unless you ask: a bar over such a message says so, and its Load Remote Content button loads them for that message, with Florence's content-blocker list applied so the trackers on it still do not load. `Mail2LoadRemoteContent YES` loads them always (with the list). JavaScript never runs. Inline images (`cid:`) are always shown. A list cannot know every sender's own tracking pixel, which is why loading stays off by default.
 - Conversations are made from References and In-Reply-To only; a reply from a program that sends neither stands alone. They are per mailbox (a conversation does not pull in your replies from Sent).
-- No rules, no signatures, no address book. Search in All Inboxes covers what is downloaded (the server search is per mailbox).
+- No address book beyond completing from your mail. Rules have one condition each. Search in All Inboxes covers what is downloaded (the server search is per mailbox).
 - OAuth needs client IDs of your own (below). Yahoo, iCloud and others still sign in with an app password.
 - Passwords and OAuth refresh tokens are kept in `~/GNUstep/Library/Mail2/Accounts.plist` (mode 600): there is no keychain on this system.
 - Emoji (outside the BMP) show as `?`, as in Milan.
@@ -118,6 +121,7 @@ On the Pi, `MAIL2_DEBUG=1 /Applications/Mail2.app/Mail2` logs the IMAP and SMTP 
 | `Mail2Message.m` | reading (MIME, HTML to text) and building messages |
 | `Mail2Store.m` | the SQLite index and the Maildir files |
 | `Mail2Account.m`, `Mail2Util.m`, `MilanText.m` | settings, helpers, font fallback (from Milan) |
+| `Mail2Rules.m`, `Mail2RulesWindow.m` | rules for new mail, and their window |
 | `Mail2OAuth.m` | OAuth sign-in (browser with PKCE, device code), token refresh, the small HTTPS client |
 | `icons/`, `tools/make_icons.sh`, `tools/make_icon.m` | Lucide glyphs, the envelope-and-stamp app icon, and their generators |
 | `tests/` | the host test of the mail core |

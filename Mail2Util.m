@@ -337,3 +337,37 @@ Mail2Base64(NSData *d)
 	}
 	return s;
 }
+
+NSString *
+Mail2EncodeMailboxName(NSString *s)
+{
+	static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,";
+	NSMutableString *out = [NSMutableString string];
+	NSUInteger i = 0, n = [s length];
+	while (i < n) {
+		unichar c = [s characterAtIndex: i];
+		if (c >= 0x20 && c <= 0x7e) {
+			[out appendString: c == '&' ? @"&-" : [NSString stringWithCharacters: &c length: 1]];
+			i++;
+			continue;
+		}
+		/* a run of others: UTF-16 big-endian, base64 with "," for "/", no padding */
+		NSMutableData *d = [NSMutableData data];
+		while (i < n && ((c = [s characterAtIndex: i]) < 0x20 || c > 0x7e)) {
+			unsigned char be[2] = { c >> 8, c & 0xff };
+			[d appendBytes: be length: 2];
+			i++;
+		}
+		const unsigned char *p = [d bytes];
+		NSUInteger k, len = [d length];
+		[out appendString: @"&"];
+		for (k = 0; k < len; k += 3) {
+			unsigned v = p[k] << 16 | (k + 1 < len ? p[k + 1] << 8 : 0) | (k + 2 < len ? p[k + 2] : 0);
+			[out appendFormat: @"%c%c", tbl[v >> 18 & 63], tbl[v >> 12 & 63]];
+			if (k + 1 < len) [out appendFormat: @"%c", tbl[v >> 6 & 63]];
+			if (k + 2 < len) [out appendFormat: @"%c", tbl[v & 63]];
+		}
+		[out appendString: @"-"];
+	}
+	return out;
+}
