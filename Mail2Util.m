@@ -407,3 +407,57 @@ Mail2ParseMailto(NSString *url)
 	}
 	return r;
 }
+
+NSDictionary *
+Mail2ParseSearch(NSString *text)
+{
+	NSMutableDictionary *q = [NSMutableDictionary dictionary];
+	NSMutableArray *words = [NSMutableArray array], *from = [NSMutableArray array], *to = [NSMutableArray array],
+	    *subject = [NSMutableArray array];
+	NSUInteger i = 0, n = [text length];
+	while (i < n) {
+		while (i < n && [text characterAtIndex: i] == ' ')
+			i++;
+		if (i >= n)
+			break;
+		/* a token: up to a space outside quotes */
+		NSMutableString *tok = [NSMutableString string];
+		BOOL quoted = NO;
+		while (i < n && (quoted || [text characterAtIndex: i] != ' ')) {
+			unichar c = [text characterAtIndex: i++];
+			if (c == '"')
+				quoted = !quoted;
+			else
+				[tok appendFormat: @"%C", c];
+		}
+		NSRange colon = [tok rangeOfString: @":"];
+		NSString *key = colon.location != NSNotFound ? [[tok substringToIndex: colon.location] lowercaseString] : nil;
+		NSString *val = colon.location != NSNotFound ? [tok substringFromIndex: colon.location + 1] : nil;
+		NSCalendarDate *day = nil;
+		if (key && ([key isEqualToString: @"before"] || [key isEqualToString: @"after"]))
+			day = [NSCalendarDate dateWithString: val calendarFormat: @"%Y-%m-%d"];
+		if ([key isEqualToString: @"from"] && [val length])
+			[from addObject: val];
+		else if ([key isEqualToString: @"to"] && [val length])
+			[to addObject: val];
+		else if ([key isEqualToString: @"subject"] && [val length])
+			[subject addObject: val];
+		else if ([key isEqualToString: @"has"] && [[val lowercaseString] hasPrefix: @"attach"])
+			[q setObject: [NSNumber numberWithBool: YES] forKey: @"Attachment"];
+		else if ([key isEqualToString: @"is"] && [[val lowercaseString] isEqualToString: @"unread"])
+			[q setObject: [NSNumber numberWithBool: YES] forKey: @"Unread"];
+		else if ([key isEqualToString: @"is"] && [[val lowercaseString] isEqualToString: @"read"])
+			[q setObject: [NSNumber numberWithBool: YES] forKey: @"Read"];
+		else if ([key isEqualToString: @"is"] && [[val lowercaseString] isEqualToString: @"flagged"])
+			[q setObject: [NSNumber numberWithBool: YES] forKey: @"Flagged"];
+		else if (day != nil)
+			[q setObject: day forKey: [key isEqualToString: @"before"] ? @"Before" : @"After"];
+		else if ([tok length])
+			[words addObject: tok];
+	}
+	[q setObject: words forKey: @"Words"];
+	[q setObject: from forKey: @"From"];
+	[q setObject: to forKey: @"To"];
+	[q setObject: subject forKey: @"Subject"];
+	return q;
+}

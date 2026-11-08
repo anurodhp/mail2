@@ -33,6 +33,29 @@
 	return m;
 }
 
++ (Mail2Mailbox *) savedSearch: (NSString *)title query: (NSString *)query index: (int)i
+{
+	Mail2Mailbox *m = [[[Mail2Mailbox alloc] init] autorelease];
+	m->mbid = Mail2SavedSearchBase - i;
+	m->name = [query copy];
+	m->displayName = [title copy];
+	m->special = [@"savedsearch" retain];
+	m->selectable = YES;
+	return m;
+}
+
++ (Mail2Mailbox *) unreadSmart
+{
+	Mail2Mailbox *m = [[[Mail2Mailbox alloc] init] autorelease];
+	m->mbid = Mail2UnreadID;
+	m->name = [@"" retain];
+	m->displayName = [@"Unread" retain];
+	m->special = [@"unreadsmart" retain];
+	m->selectable = YES;
+	m->unread = [[Mail2Store sharedStore] unreadCount];
+	return m;
+}
+
 + (Mail2Mailbox *) flagged
 {
 	Mail2Mailbox *m = [[[Mail2Mailbox alloc] init] autorelease];
@@ -222,6 +245,20 @@ special_rank(NSString *s)
 		    "PRAGMA user_version = 1;"];
 		[self exec: "COMMIT"];
 	}
+	/* version 2: muted conversations and blocked senders */
+	if ([self userVersion] < 2)
+		[self exec: "CREATE TABLE IF NOT EXISTS muted (thread TEXT PRIMARY KEY);"
+		    "CREATE TABLE IF NOT EXISTS blocked (address TEXT PRIMARY KEY); PRAGMA user_version = 2;"];
+	muted = [[NSMutableSet alloc] init];
+	blocked = [[NSMutableSet alloc] init];
+	sqlite3_stmt *ms = [self prepare: "SELECT thread FROM muted"];
+	while (ms && sqlite3_step(ms) == SQLITE_ROW)
+		[muted addObject: col_string(ms, 0)];
+	sqlite3_finalize(ms);
+	ms = [self prepare: "SELECT address FROM blocked"];
+	while (ms && sqlite3_step(ms) == SQLITE_ROW)
+		[blocked addObject: col_string(ms, 0)];
+	sqlite3_finalize(ms);
 	return self;
 }
 
@@ -413,7 +450,9 @@ special_rank(NSString *s)
 
 /* a mailbox, or with Mail2AllInboxesID every account's Inbox (?1 is the mailbox id) */
 #define MBOX "(mailbox = ?1 OR (?1 = -1 AND mailbox IN (SELECT id FROM mailboxes WHERE special = 'inbox'))" \
-	" OR (?1 = -2 AND (flags & 4) != 0 AND mailbox NOT IN (SELECT id FROM mailboxes WHERE special IN ('trash', 'junk'))))"
+	" OR (?1 = -2 AND (flags & 4) != 0 AND mailbox NOT IN (SELECT id FROM mailboxes WHERE special IN ('trash', 'junk')))" \
+	" OR (?1 = -4 AND (flags & 1) = 0 AND mailbox NOT IN (SELECT id FROM mailboxes WHERE special IN ('trash', 'junk', 'sent', 'drafts')))" \
+	" OR (?1 = -5 AND mailbox NOT IN (SELECT id FROM mailboxes WHERE special IN ('trash', 'junk'))))"
 
 #define MESSAGE_COLUMNS "id, mailbox, uid, flags, date, from_name, from_addr, to_list, cc_list, reply_to, subject," \
 	" message_id, in_reply_to, refs, size, attach, snippet, file, thread"
@@ -654,29 +693,81 @@ fts_query(NSString *text)
 	return [terms componentsJoinedByString: @" "];
 }
 
+static NSString *
+like_pattern(NSString *t)
+{
+	NSString *e = [[[t stringByReplacingOccurrencesOfString: @"\\" withString: @"\\\\"]
+	    stringByReplacingOccurrencesOfString: @"%" withString: @"\\%"] stringByReplacingOccurrencesOfString: @"_" withString: @"\\_"];
+	return [NSString stringWithFormat: @"%%%@%%", e];
+}
+
+/* Mail2ParseSearch's query in SQL: every filter, and every free word (in the envelope, the opening or the downloaded
+ * body) -- or, for the words, being among the server's matches (uids) */
 - (NSArray *) searchMailbox: (long long)mbid text: (NSString *)text alsoUids: (NSArray *)uids limit: (int)limit
 {
+	NSDictionary *q = Mail2ParseSearch(text ? text : @"");
+	NSMutableArray *params = [NSMutableArray array];	/* strings, or NSNumber doubles */
+	NSMutableString *sql = [NSMutableString stringWithString: @"SELECT " MESSAGE_COLUMNS " FROM messages WHERE " MBOX
+	    " AND (flags & 8) = 0"];
+#define P(v) ([params addObject: (v)], [NSString stringWithFormat: @"?%lu", (unsigned long)[params count] + 1])
+	NSEnumerator *e;
+	NSString *v;
+	e = [[q objectForKey: @"From"] objectEnumerator];
+	while ((v = [e nextObject]) != nil) {
+		NSString *ph = P(like_pattern(v));
+		[sql appendFormat: @" AND (from_name LIKE %@ ESCAPE '\\' OR from_addr LIKE %@ ESCAPE '\\')", ph, ph];
+	}
+	e = [[q objectForKey: @"To"] objectEnumerator];
+	while ((v = [e nextObject]) != nil) {
+		NSString *ph = P(like_pattern(v));
+		[sql appendFormat: @" AND (to_list LIKE %@ ESCAPE '\\' OR cc_list LIKE %@ ESCAPE '\\')", ph, ph];
+	}
+	e = [[q objectForKey: @"Subject"] objectEnumerator];
+	while ((v = [e nextObject]) != nil)
+		[sql appendFormat: @" AND subject LIKE %@ ESCAPE '\\'", P(like_pattern(v))];
+	if ([q objectForKey: @"Attachment"]) [sql appendString: @" AND attach = 1"];
+	if ([q objectForKey: @"Unread"]) [sql appendString: @" AND (flags & 1) = 0"];
+	if ([q objectForKey: @"Read"]) [sql appendString: @" AND (flags & 1) != 0"];
+	if ([q objectForKey: @"Flagged"]) [sql appendString: @" AND (flags & 4) != 0"];
+	if ([q objectForKey: @"Before"])
+		[sql appendFormat: @" AND date < %@", P([NSNumber numberWithDouble: [[q objectForKey: @"Before"] timeIntervalSince1970]])];
+	if ([q objectForKey: @"After"])
+		[sql appendFormat: @" AND date >= %@", P([NSNumber numberWithDouble: [[q objectForKey: @"After"] timeIntervalSince1970]])];
+	NSArray *words = [q objectForKey: @"Words"];
+	if ([words count]) {
+		NSMutableString *w = [NSMutableString stringWithString: @"(1"];
+		e = [words objectEnumerator];
+		while ((v = [e nextObject]) != nil) {
+			NSString *ph = P(like_pattern(v));
+			[w appendString: [@" AND (subject LIKE # ESCAPE '\\' OR from_name LIKE # ESCAPE '\\' OR from_addr LIKE # ESCAPE '\\'"
+			    " OR to_list LIKE # ESCAPE '\\' OR cc_list LIKE # ESCAPE '\\' OR snippet LIKE # ESCAPE '\\'"
+			    stringByReplacingOccurrencesOfString: @"#" withString: ph]];
+			NSString *fq = fts_query(v);
+			if ([fq length])
+				[w appendFormat: @" OR id IN (SELECT docid FROM bodies WHERE body MATCH %@)", P(fq)];
+			[w appendString: @")"];
+		}
+		[w appendString: @")"];
+		NSString *uidList = [uids count] && mbid >= 0 ? [uids componentsJoinedByString: @","] : nil;	/* numbers only */
+		if (uidList)
+			[sql appendFormat: @" AND (%@ OR uid IN (%@))", w, uidList];
+		else
+			[sql appendFormat: @" AND %@", w];
+	}
+	[sql appendFormat: @" ORDER BY date DESC, uid DESC LIMIT %d", limit];
+#undef P
 	NSArray *r;
-	NSString *q = fts_query(text);
-	NSString *uidList = [uids count] ? [uids componentsJoinedByString: @","] : @"";
-	NSMutableString *sql = [NSMutableString stringWithString:
-	    @"SELECT " MESSAGE_COLUMNS " FROM messages WHERE " MBOX " AND (flags & 8) = 0 AND ("
-	    " (subject LIKE ?2 ESCAPE '\\' OR from_name LIKE ?2 ESCAPE '\\' OR from_addr LIKE ?2 ESCAPE '\\'"
-	    "  OR to_list LIKE ?2 ESCAPE '\\' OR cc_list LIKE ?2 ESCAPE '\\' OR snippet LIKE ?2 ESCAPE '\\')"];
-	if ([q length])
-		[sql appendString: @" OR id IN (SELECT docid FROM bodies WHERE body MATCH ?3)"];
-	if ([uidList length] && mbid >= 0)	/* numbers only: from the server's search */
-		[sql appendFormat: @" OR uid IN (%@)", uidList];
-	[sql appendString: @") ORDER BY date DESC, uid DESC LIMIT ?4"];
-	NSString *like = [[[text stringByReplacingOccurrencesOfString: @"\\" withString: @"\\\\"]
-	    stringByReplacingOccurrencesOfString: @"%" withString: @"\\%"] stringByReplacingOccurrencesOfString: @"_" withString: @"\\_"];
 	[lock lock];
 	sqlite3_stmt *st = [self prepare: [sql UTF8String]];
 	sqlite3_bind_int64(st, 1, mbid);
-	bind_string(st, 2, [NSString stringWithFormat: @"%%%@%%", like]);
-	if ([q length])
-		bind_string(st, 3, q);
-	sqlite3_bind_int(st, 4, limit);
+	NSUInteger i;
+	for (i = 0; i < [params count]; i++) {
+		id pv = [params objectAtIndex: i];
+		if ([pv isKindOfClass: [NSNumber class]])
+			sqlite3_bind_double(st, (int)i + 2, [pv doubleValue]);
+		else
+			bind_string(st, (int)i + 2, pv);
+	}
 	r = [self rowsFor: st counted: NO];
 	[lock unlock];
 	return r;
@@ -774,7 +865,22 @@ fts_query(NSString *text)
 		return [self unreadInInboxes];
 	if (mbid == Mail2FlaggedID)
 		return [self flaggedCount];
+	if (mbid == Mail2UnreadID)
+		return [self unreadCount];
 	return [self countQuery: "SELECT COUNT(*) FROM messages WHERE mailbox = ? AND (flags & 9) = 0" mailbox: mbid];
+}
+
+- (int) unreadCount
+{
+	int n = 0;
+	[lock lock];
+	sqlite3_stmt *st = [self prepare: "SELECT COUNT(*) FROM messages WHERE (flags & 9) = 0 AND"
+	    " mailbox NOT IN (SELECT id FROM mailboxes WHERE special IN ('trash', 'junk', 'sent', 'drafts'))"];
+	if (st && sqlite3_step(st) == SQLITE_ROW)
+		n = sqlite3_column_int(st, 0);
+	sqlite3_finalize(st);
+	[lock unlock];
+	return n;
 }
 
 - (int) flaggedCount
@@ -815,6 +921,51 @@ fts_query(NSString *text)
 	while (sqlite3_step(st) == SQLITE_ROW)
 		[r addObject: [self messageFromRow: st]];
 	sqlite3_finalize(st);
+	[lock unlock];
+	return r;
+}
+
+/* ---- muted conversations, blocked senders ---- */
+
+- (void) setThread: (NSString *)thread muted: (BOOL)on
+{
+	if (thread == nil)
+		return;
+	[lock lock];
+	sqlite3_stmt *st = [self prepare: on ? "INSERT OR IGNORE INTO muted(thread) VALUES(?)" : "DELETE FROM muted WHERE thread = ?"];
+	bind_string(st, 1, thread);
+	sqlite3_step(st);
+	sqlite3_finalize(st);
+	if (on) [muted addObject: thread]; else [muted removeObject: thread];
+	[lock unlock];
+}
+
+- (BOOL) isThreadMuted: (NSString *)thread
+{
+	[lock lock];
+	BOOL r = thread != nil && [muted containsObject: thread];
+	[lock unlock];
+	return r;
+}
+
+- (void) setAddress: (NSString *)addr blocked: (BOOL)on
+{
+	NSString *a = [[addr stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]] lowercaseString];
+	if ([a length] == 0)
+		return;
+	[lock lock];
+	sqlite3_stmt *st = [self prepare: on ? "INSERT OR IGNORE INTO blocked(address) VALUES(?)" : "DELETE FROM blocked WHERE address = ?"];
+	bind_string(st, 1, a);
+	sqlite3_step(st);
+	sqlite3_finalize(st);
+	if (on) [blocked addObject: a]; else [blocked removeObject: a];
+	[lock unlock];
+}
+
+- (BOOL) isAddressBlocked: (NSString *)addr
+{
+	[lock lock];
+	BOOL r = addr != nil && [blocked containsObject: [addr lowercaseString]];
 	[lock unlock];
 	return r;
 }

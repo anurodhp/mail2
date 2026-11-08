@@ -20,6 +20,12 @@ enum {
 #define Mail2FlaggedID (-2LL)
 /* the Outbox (Mail2Outbox): messages waiting to go, which are not in the index */
 #define Mail2OutboxID (-3LL)
+/* every unread message (not in Trash, Junk, Sent or Drafts): the Unread smart mailbox */
+#define Mail2UnreadID (-4LL)
+/* every mailbox but Trash and Junk: where saved searches (smart mailboxes) look */
+#define Mail2EverywhereID (-5LL)
+/* saved searches are shown as mailboxes with ids from here down: Mail2SavedSearchBase - index */
+#define Mail2SavedSearchBase (-100LL)
 
 @interface Mail2Mailbox : NSObject
 {
@@ -42,7 +48,10 @@ enum {
 - (int) depth;			/* nesting level below its account */
 + (Mail2Mailbox *) allInboxes;	/* the viewer's All Inboxes, unread counted across the accounts */
 + (Mail2Mailbox *) flagged;
-+ (Mail2Mailbox *) outbox: (int)count;	/* the Flagged smart mailbox, its count the flagged messages */
++ (Mail2Mailbox *) outbox: (int)count;
++ (Mail2Mailbox *) unreadSmart;
+/* a saved search: its query in -name, shown as a mailbox (mbid Mail2SavedSearchBase - index) */
++ (Mail2Mailbox *) savedSearch: (NSString *)title query: (NSString *)query index: (int)i;	/* the Flagged smart mailbox, its count the flagged messages */
 - (BOOL) isVirtual;		/* All Inboxes or Flagged: messages of several mailboxes, no account of its own */
 @end
 
@@ -90,6 +99,7 @@ enum {
 {
 	void *db;	/* sqlite3 * */
 	NSRecursiveLock *lock;
+	NSMutableSet *muted, *blocked;	/* thread keys; lowercased addresses */
 }
 + (Mail2Store *) sharedStore;
 
@@ -111,8 +121,8 @@ enum {
 /* the newest message of each conversation, newest first, with -threadCount and -threadUnread */
 - (NSArray *) conversationsInMailbox: (long long)mbid limit: (int)limit;
 - (NSArray *) messagesInConversation: (NSString *)thread mailbox: (long long)mbid;	/* newest first */
-/* messages whose sender, recipients, subject, opening or (downloaded) body has the text, or whose UID is in uids (the
- * server's matches), newest first */
+/* the messages a search finds (Mail2ParseSearch: filters and free words; each word in the sender, recipients,
+ * subject, opening or downloaded body -- or the message among uids, the server's matches), newest first */
 - (NSArray *) searchMailbox: (long long)mbid text: (NSString *)text alsoUids: (NSArray *)uids limit: (int)limit;
 - (Mail2MessageInfo *) messageWithRowID: (long long)rowid;
 - (unsigned) maxUidInMailbox: (long long)mbid;
@@ -126,9 +136,16 @@ enum {
 - (void) removeMessage: (long long)rowid;
 - (int) unreadInMailbox: (long long)mbid;
 - (int) unreadInInboxes;
-- (int) flaggedCount;	/* every account's Inbox: the dock badge */
+- (int) flaggedCount;
+- (int) unreadCount;	/* what the Unread smart mailbox holds */	/* every account's Inbox: the dock badge */
 /* the newest messages without a file, for prefetching */
 - (NSArray *) messagesToPrefetchInMailbox: (long long)mbid limit: (int)limit maxSize: (unsigned long long)maxSize;
+
+/* ---- muted conversations, blocked senders ---- */
+- (void) setThread: (NSString *)thread muted: (BOOL)on;
+- (BOOL) isThreadMuted: (NSString *)thread;		/* from memory: quick enough for drawing rows */
+- (void) setAddress: (NSString *)addr blocked: (BOOL)on;
+- (BOOL) isAddressBlocked: (NSString *)addr;
 
 /* ---- addresses ---- */
 /* people seen ("Name <addr>" or "addr"), whose address or name starts with prefix (or a word of the name does),

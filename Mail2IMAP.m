@@ -443,21 +443,46 @@ uids_from_search(clist *res)
 	return r;
 }
 
+/* a key with no argument (SEEN, UNSEEN, FLAGGED): libetpan has no helper for these */
+static struct mailimap_search_key *
+flag_key(int type)
+{
+	return mailimap_search_key_new(type, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+	    NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL);
+}
+
+static struct mailimap_date *
+imap_day(NSDate *d)
+{
+	NSCalendarDate *cd = [NSCalendarDate dateWithTimeIntervalSinceReferenceDate: [d timeIntervalSinceReferenceDate]];
+	return mailimap_date_new([cd dayOfMonth], [cd monthOfYear], [cd yearOfCommonEra]);
+}
+
+/* the search as typed (Mail2ParseSearch) as IMAP keys: FROM, TO, SUBJECT, UNSEEN, SEEN, FLAGGED, BEFORE, SINCE, and
+ * TEXT for each free word; has:attachment has no IMAP key and is left to the index */
 - (NSArray *) uidsMatchingText: (NSString *)text error: (NSString **)err
 {
+	NSDictionary *q = Mail2ParseSearch(text);
 	BOOL ascii = [text canBeConvertedToEncoding: NSASCIIStringEncoding];
-	/* every word must match somewhere (TEXT: headers and body) */
-	NSArray *words = [text componentsSeparatedByCharactersInSet: [NSCharacterSet whitespaceAndNewlineCharacterSet]];
 	struct mailimap_search_key *all = mailimap_search_key_new_multiple_empty();
-	NSEnumerator *e = [words objectEnumerator];
-	NSString *w;
+	NSEnumerator *e;
+	NSString *v;
 	int n = 0;
-	while ((w = [e nextObject]) != nil) {
-		if ([w length] == 0)
-			continue;
-		mailimap_search_key_multiple_add(all, mailimap_search_key_new_text(strdup([w UTF8String])));
-		n++;
-	}
+#define ADD(k) (mailimap_search_key_multiple_add(all, (k)), n++)
+	e = [[q objectForKey: @"Words"] objectEnumerator];
+	while ((v = [e nextObject]) != nil) ADD(mailimap_search_key_new_text(strdup([v UTF8String])));
+	e = [[q objectForKey: @"From"] objectEnumerator];
+	while ((v = [e nextObject]) != nil) ADD(mailimap_search_key_new_from(strdup([v UTF8String])));
+	e = [[q objectForKey: @"To"] objectEnumerator];
+	while ((v = [e nextObject]) != nil) ADD(mailimap_search_key_new_to(strdup([v UTF8String])));
+	e = [[q objectForKey: @"Subject"] objectEnumerator];
+	while ((v = [e nextObject]) != nil) ADD(mailimap_search_key_new_subject(strdup([v UTF8String])));
+	if ([q objectForKey: @"Unread"]) ADD(flag_key(MAILIMAP_SEARCH_KEY_UNSEEN));
+	if ([q objectForKey: @"Read"]) ADD(flag_key(MAILIMAP_SEARCH_KEY_SEEN));
+	if ([q objectForKey: @"Flagged"]) ADD(flag_key(MAILIMAP_SEARCH_KEY_FLAGGED));
+	if ([q objectForKey: @"Before"]) ADD(mailimap_search_key_new_before(imap_day([q objectForKey: @"Before"])));
+	if ([q objectForKey: @"After"]) ADD(mailimap_search_key_new_since(imap_day([q objectForKey: @"After"])));
+#undef ADD
 	if (n == 0) {
 		mailimap_search_key_free(all);
 		return [NSArray array];

@@ -34,6 +34,12 @@ for pair in inbox:inbox drafts:file-pen sent:send archive:archive junk:octagon-a
     render "sb-$n-sel" "$s" 16 "#ffffff" 2
 done
 # the Flagged smart mailbox: an orange flag, as the flags in the list
+render "sb-unread"     mail-open 16 "#2f7fd8" 2
+render "sb-unread-sel" mail-open 16 "#ffffff" 2
+render "sb-search"     search 16 "#2f7fd8" 2
+render "sb-search-sel" search 16 "#ffffff" 2
+render "sb-muted"      bell-off 16 "#8a8a8a" 2
+render "sb-muted-sel"  bell-off 16 "#ffffff" 2
 render "sb-flag"     flag 16 "#f08c1a" 2
 render "sb-flag-sel" flag 16 "#ffffff" 2
 # the application icon

@@ -252,7 +252,7 @@ static NSString *volatile heartbeatMode;
 	NSDictionary *opts = [NSDictionary dictionaryWithObjectsAndKeys:
 	    @"Mail2", @"ApplicationName",
 	    @"A small IMAP mail client for GNUstep.", @"ApplicationDescription",
-	    @"0.6", @"ApplicationRelease",
+	    @"0.7", @"ApplicationRelease",
 	    [NSArray arrayWithObject: @"Anurodh Pokharel"], @"Authors",
 	    @"Copyright © 2026 Anurodh Pokharel. MIT license.", @"Copyright",
 	    @"Mail by libetpan 1.9.4 (BSD), SQLite 3.44 (public domain) and Mbed TLS 3.6 (Apache-2.0). Icons from Lucide (ISC).",
@@ -278,6 +278,9 @@ static NSString *volatile heartbeatMode;
 - (void) applyRules: (id)s { [viewer applyRules: s]; }
 - (void) showSource: (id)s { [viewer showSource: s]; }
 - (void) sendNow: (id)s { [viewer sendNow: s]; }
+- (void) saveSearch: (id)s { [viewer saveSearch: s]; }
+- (void) toggleMute: (id)s { [viewer toggleMute: s]; }
+- (void) toggleBlock: (id)s { [viewer toggleBlock: s]; }
 
 - (void) showRules: (id)sender
 {
@@ -295,6 +298,8 @@ static NSString *volatile heartbeatMode;
 {
 	SEL a = [i action];
 
+	if ((a == @selector(toggleMute:) || a == @selector(toggleBlock:)) && viewer != nil)
+		return [viewer validateMenuItem: i];
 	if (a == @selector(toggleConversations:)) {
 		[i setState: [Mail2Window organizesByConversation] ? NSOnState : NSOffState];
 		return YES;
@@ -368,6 +373,7 @@ static NSString *volatile heartbeatMode;
 	it = add_item(m, @"Get All New Mail", @selector(getMail:), @"N", self);
 	add_item(m, @"Get Older Messages", @selector(getOlderMessages:), nil, self);
 	[m addItem: [NSMenuItem separatorItem]];
+	add_item(m, @"Save Search as Smart Mailbox…", @selector(saveSearch:), nil, self);
 	add_item(m, @"New Mailbox…", @selector(newMailbox:), nil, self);
 	add_item(m, @"Rename Mailbox…", @selector(renameMailbox:), nil, self);
 	add_item(m, @"Delete Mailbox…", @selector(deleteMailbox:), nil, self);
@@ -383,6 +389,8 @@ static NSString *volatile heartbeatMode;
 	add_item(m, @"Move To…", @selector(moveTo:), @"M", self);
 	add_item(m, @"Mark as Junk", @selector(markJunk:), @"J", self);
 	add_item(m, @"Apply Rules", @selector(applyRules:), nil, self);
+	add_item(m, @"Mute Conversation", @selector(toggleMute:), nil, self);
+	add_item(m, @"Block Sender", @selector(toggleBlock:), nil, self);
 	add_item(m, @"Show Raw Source", @selector(showSource:), nil, self);
 	add_item(m, @"Send Now", @selector(sendNow:), nil, self);
 	add_item(m, @"Mark as Read/Unread", @selector(toggleRead:), @"U", self);

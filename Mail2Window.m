@@ -197,6 +197,7 @@ scroller_for(NSTableView *t, NSRect r)
 	[list setTarget: self];
 	[list setDoubleAction: @selector(listDoubleClicked:)];
 	childRows = [[NSMutableSet alloc] init];
+	stickyRows = [[NSMutableSet alloc] init];
 	NSScrollView *ls = scroller_for(list, NSMakeRect(0, 0, LIST_W, h));
 
 	/* pane 3: the message */
@@ -230,6 +231,7 @@ scroller_for(NSTableView *t, NSRect r)
 	[sidebarCell release]; [messageCell release]; [messageView release]; [statusField release]; [buttons release];
 	[current release]; [messages release]; [parsed release];
 	[searchField release]; [searchText release]; [serverHits release]; [expanded release]; [childRows release];
+	[stickyRows release];
 	[undo release]; [undoBar release]; [undoLabel release]; [sidebarScroll release];
 	[super dealloc];
 }
@@ -343,6 +345,9 @@ scroller_for(NSTableView *t, NSRect r)
 	[sidebarItems removeAllObjects];
 	if ([sessions count] > 1)
 		[sidebarItems addObject: [Mail2Mailbox allInboxes]];
+	/* Unread, while there is something unread (or it is shown) */
+	if ([sessions count] > 0 && ([[Mail2Store sharedStore] unreadCount] > 0 || [current mbid] == Mail2UnreadID))
+		[sidebarItems addObject: [Mail2Mailbox unreadSmart]];
 	/* the Outbox, while something waits to go */
 	NSUInteger waiting = [[[Mail2Outbox shared] items] count];
 	if (waiting > 0 || [current mbid] == Mail2OutboxID)
@@ -351,6 +356,14 @@ scroller_for(NSTableView *t, NSRect r)
 	Mail2Mailbox *fl = [Mail2Mailbox flagged];
 	if ([sessions count] > 0 && ([fl unread] > 0 || [current mbid] == Mail2FlaggedID))
 		[sidebarItems addObject: fl];
+	/* saved searches */
+	NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey: @"Mail2SavedSearches"];
+	NSUInteger si;
+	for (si = 0; si < [saved count] && [sessions count] > 0; si++) {
+		NSDictionary *d = [saved objectAtIndex: si];
+		if ([d isKindOfClass: [NSDictionary class]] && [[d objectForKey: @"Query"] length])
+			[sidebarItems addObject: [Mail2Mailbox savedSearch: [d objectForKey: @"Name"] query: [d objectForKey: @"Query"] index: (int)si]];
+	}
 	while ((s = [e nextObject]) != nil) {
 		NSArray *boxes = [[Mail2Store sharedStore] mailboxesForAccount: [[s account] identifier]];
 		[sidebarItems addObject: [[s account] email]];
@@ -424,7 +437,8 @@ scroller_for(NSTableView *t, NSRect r)
 
 - (BOOL) showsConversations
 {
-	return searchText == nil && [Mail2Window organizesByConversation];
+	return searchText == nil && [Mail2Window organizesByConversation] && [current mbid] != Mail2UnreadID &&
+	    [current mbid] > Mail2SavedSearchBase;
 }
 
 /* the rows: search results; or the newest message of each conversation, with the opened one's other messages under
@@ -437,6 +451,32 @@ scroller_for(NSTableView *t, NSRect r)
 		return [NSArray array];
 	if ([current mbid] == Mail2OutboxID)
 		return [self outboxRows];
+	if ([current mbid] <= Mail2SavedSearchBase) {	/* a saved search, narrowed by the search field */
+		NSString *q = searchText ? [NSString stringWithFormat: @"%@ %@", [current name], searchText] : [current name];
+		return [store searchMailbox: Mail2EverywhereID text: q alsoUids: nil limit: LIST_LIMIT];
+	}
+	if ([current mbid] == Mail2UnreadID && searchText == nil) {
+		/* what was read here stays until the mailbox is left, as in Apple Mail */
+		NSMutableArray *r = [NSMutableArray arrayWithArray: [store messagesInMailbox: Mail2UnreadID limit: LIST_LIMIT]];
+		NSMutableSet *have = [NSMutableSet set];
+		NSEnumerator *ue = [r objectEnumerator];
+		Mail2MessageInfo *um;
+		while ((um = [ue nextObject]) != nil)
+			[have addObject: [NSNumber numberWithLongLong: [um rowid]]];
+		ue = [[stickyRows allObjects] objectEnumerator];
+		NSNumber *rid;
+		while ((rid = (NSNumber *)[ue nextObject]) != nil)
+			if (![have containsObject: rid]) {
+				Mail2MessageInfo *sm = [store messageWithRowID: [rid longLongValue]];
+				if (sm != nil && ([sm flags] & Mail2FlagDeleted) == 0)
+					[r addObject: sm];
+			}
+		[r sortUsingComparator: ^NSComparisonResult(id a, id b) { return [[b date] compare: [a date]]; }];
+		ue = [r objectEnumerator];
+		while ((um = [ue nextObject]) != nil)
+			[stickyRows addObject: [NSNumber numberWithLongLong: [um rowid]]];
+		return r;
+	}
 	if (searchText != nil)
 		return [store searchMailbox: [current mbid] text: searchText alsoUids: serverHits limit: LIST_LIMIT];
 	if (![self showsConversations])
@@ -530,6 +570,7 @@ scroller_for(NSTableView *t, NSRect r)
 		return;
 	ASSIGN(current, m);
 	DESTROY(expanded);
+	[stickyRows removeAllObjects];
 	if (searchText != nil) {	/* a search is of one mailbox */
 		DESTROY(searchText);
 		DESTROY(serverHits);
@@ -560,7 +601,8 @@ scroller_for(NSTableView *t, NSRect r)
 - (void) messagesChanged: (NSNotification *)n
 {
 	long long mbid = [[[n userInfo] objectForKey: @"Mailbox"] longLongValue];
-	if (current != nil && (mbid == [current mbid] || [current mbid] == Mail2FlaggedID ||
+	if (current != nil && (mbid == [current mbid] || [current mbid] == Mail2FlaggedID || [current mbid] == Mail2UnreadID ||
+	    [current mbid] <= Mail2SavedSearchBase ||
 	    ([current mbid] == Mail2AllInboxesID && [[[[Mail2Store sharedStore] mailboxWithID: mbid] special] isEqualToString: @"inbox"])))
 		[self reloadMessages];
 	/* Flagged comes and goes with the flagged messages */
@@ -569,7 +611,12 @@ scroller_for(NSTableView *t, NSRect r)
 	for (j = 0; j < [sidebarItems count]; j++)
 		if ([[sidebarItems objectAtIndex: j] isKindOfClass: [Mail2Mailbox class]] && [[sidebarItems objectAtIndex: j] mbid] == Mail2FlaggedID)
 			listed = YES;
-	if (listed != ([[Mail2Store sharedStore] flaggedCount] > 0 || [current mbid] == Mail2FlaggedID))
+	BOOL unreadListed = NO;
+	for (j = 0; j < [sidebarItems count]; j++)
+		if ([[sidebarItems objectAtIndex: j] isKindOfClass: [Mail2Mailbox class]] && [[sidebarItems objectAtIndex: j] mbid] == Mail2UnreadID)
+			unreadListed = YES;
+	if (listed != ([[Mail2Store sharedStore] flaggedCount] > 0 || [current mbid] == Mail2FlaggedID) ||
+	    unreadListed != ([[Mail2Store sharedStore] unreadCount] > 0 || [current mbid] == Mail2UnreadID))
 		[self reloadSidebar];
 	/* the unread counts */
 	NSUInteger i;
@@ -820,6 +867,11 @@ scroller_for(NSTableView *t, NSRect r)
 		[self updateButtons];
 		return;
 	}
+	/* a closed conversation's row: all of it, one after the other */
+	if ([self showsConversations] && [m threadCount] > 1 && ![childRows containsObject: [NSNumber numberWithLongLong: [m rowid]]]) {
+		[self showConversationOf: m generation: showGeneration];
+		return;
+	}
 	Mail2Session *s = [self sessionForMessage: m];
 	if (Mail2Debug())
 		NSLog(@"Mail2: show message uid %u (%@)", [m uid], [m file] ? @"downloaded" : @"to download");
@@ -871,9 +923,17 @@ scroller_for(NSTableView *t, NSRect r)
 		return [[self selectedMessages] count] > 0;
 	if (a == @selector(showSource:))
 		return [self selectedMessage] != nil;
+	if (a == @selector(toggleMute:))
+		return [[self selectedMessage] thread] != nil;
+	if (a == @selector(toggleBlock:))
+		return [[self selectedMessage] fromAddr] != nil;
 	if (a == @selector(moveTo:) || a == @selector(markJunk:) || a == @selector(applyRules:))
 		return [[self selectedMessages] count] > 0;
-	if (a == @selector(renameMailbox:) || a == @selector(deleteMailbox:))
+	if (a == @selector(saveSearch:))
+		return searchText != nil;
+	if (a == @selector(deleteMailbox:))
+		return [self currentIsOwnFolder] || [current mbid] <= Mail2SavedSearchBase;
+	if (a == @selector(renameMailbox:))
 		return [self currentIsOwnFolder];
 	if (a == @selector(newMailbox:))
 		return [sessions count] > 0;
@@ -904,6 +964,11 @@ scroller_for(NSTableView *t, NSRect r)
 
 - (BOOL) validateMenuItem: (NSMenuItem *)item
 {
+	Mail2MessageInfo *m = [self selectedMessage];
+	if ([item action] == @selector(toggleMute:))
+		[item setTitle: m && [[Mail2Store sharedStore] isThreadMuted: [m thread]] ? @"Unmute Conversation" : @"Mute Conversation"];
+	if ([item action] == @selector(toggleBlock:))
+		[item setTitle: m && [[Mail2Store sharedStore] isAddressBlocked: [m fromAddr]] ? @"Unblock Sender" : @"Block Sender"];
 	return [self validateAction: [item action]];
 }
 
@@ -976,6 +1041,68 @@ scroller_for(NSTableView *t, NSRect r)
 		[list scrollRowToVisible: next];
 	}
 	[self showSelection];
+}
+
+/* ---- a conversation in the message pane ---- */
+
+/* downloads what is missing (one after the other), parses them all off the main thread, shows them, marks them read */
+- (void) showConversationOf: (Mail2MessageInfo *)head generation: (unsigned)gen
+{
+	NSArray *newestFirst = [[Mail2Store sharedStore] messagesInConversation: [head thread] mailbox: [current mbid]];
+	NSArray *msgs = [[newestFirst reverseObjectEnumerator] allObjects];
+	NSMutableArray *missing = [NSMutableArray array];
+	NSEnumerator *e = [msgs objectEnumerator];
+	Mail2MessageInfo *m;
+	while ((m = [e nextObject]) != nil)
+		if ([[Mail2Store sharedStore] pathForMessage: m] == nil)
+			[missing addObject: m];
+	if ([missing count]) {
+		[messageView showMessage: head body: @"Downloading the conversation…" attachments: nil];
+		Mail2MessageInfo *first = [missing objectAtIndex: 0];
+		[[self sessionForMessage: first] fetchMessage: first completion: ^(NSString *err) {
+			if (gen != showGeneration)
+				return;
+			if (err != nil) {
+				[messageView showMessage: head body: [NSString stringWithFormat: @"The conversation could not be downloaded.\n\n%@", err]
+				    attachments: nil];
+				return;
+			}
+			[self showConversationOf: head generation: gen];
+		}];
+		return;
+	}
+	[msgs retain];
+	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+		NSMutableArray *parsedAll = [NSMutableArray array];
+		NSEnumerator *pe = [msgs objectEnumerator];
+		Mail2MessageInfo *pm;
+		while ((pm = [pe nextObject]) != nil) {
+			NSString *path = [[Mail2Store sharedStore] pathForMessage: pm];
+			Mail2ParsedMessage *p = path ? [Mail2ParsedMessage parseData: [NSData dataWithContentsOfFile: path] preferPlainText: YES] : nil;
+			[parsedAll addObject: p ? (id)p : (id)[NSNull null]];
+		}
+		[parsedAll retain];
+		Mail2RunOnMain(^{
+			if (gen == showGeneration) {
+				[messageView showConversation: msgs parsed: parsedAll];
+				id last = [parsedAll lastObject];
+				if ([last isKindOfClass: [Mail2ParsedMessage class]])
+					ASSIGN(parsed, last);	/* Reply answers the newest */
+				[self updateButtons];
+				NSMutableArray *unread = [NSMutableArray array];
+				NSEnumerator *ue = [msgs objectEnumerator];
+				Mail2MessageInfo *um;
+				while ((um = [ue nextObject]) != nil)
+					if ([um isUnread])
+						[unread addObject: um];
+				[self eachSession: unread do: ^(Mail2Session *s, NSArray *mine) { [s setFlag: Mail2FlagSeen on: YES forMessages: mine]; }];
+			}
+			[parsedAll release];
+			[msgs release];
+		});
+		[pool release];
+	});
 }
 
 /* ---- the Outbox ---- */
@@ -1244,6 +1371,52 @@ scroller_for(NSTableView *t, NSRect r)
 	[w makeKeyAndOrderFront: nil];
 }
 
+/* ---- mute, block ---- */
+
+- (void) toggleMute: (id)sender
+{
+	Mail2MessageInfo *m = [self selectedMessage];
+	if ([m thread] == nil)
+		return;
+	[[Mail2Store sharedStore] setThread: [m thread] muted: ![[Mail2Store sharedStore] isThreadMuted: [m thread]]];
+	[list setNeedsDisplay: YES];
+}
+
+- (void) toggleBlock: (id)sender
+{
+	Mail2MessageInfo *m = [self selectedMessage];
+	NSString *addr = [m fromAddr];
+	Mail2Store *store = [Mail2Store sharedStore];
+	if (addr == nil)
+		return;
+	if ([store isAddressBlocked: addr]) {
+		[store setAddress: addr blocked: NO];
+		return;
+	}
+	NSInteger r = NSRunAlertPanel(@"Block Sender?", @"New mail from %@ will go straight to the Trash.",
+	    @"Block and Move Their Mail", @"Cancel", @"Block", addr);
+	if (r == NSAlertAlternateReturn)
+		return;
+	[store setAddress: addr blocked: YES];
+	if (r == NSAlertDefaultReturn) {	/* what is here from them, to the Trash too */
+		NSString *q = [NSString stringWithFormat: @"from:\"%@\"", addr];
+		NSArray *theirs = [store searchMailbox: [current isVirtual] ? Mail2EverywhereID : [current mbid] text: q alsoUids: nil limit: 5000];
+		[self eachSession: theirs do: ^(Mail2Session *s, NSArray *mine) {
+			Mail2Mailbox *trash = [s mailboxWithSpecial: @"trash"];
+			NSMutableArray *notInTrash = [NSMutableArray array];
+			NSEnumerator *e = [mine objectEnumerator];
+			Mail2MessageInfo *x;
+			while ((x = [e nextObject]) != nil)
+				if ([x mbid] != [trash mbid])
+					[notInTrash addObject: x];
+			if (trash != nil && [notInTrash count])
+				[self move: notInTrash of: s to: trash action: @"Block Sender"];
+		}];
+		[self reloadMessages];
+		[self showSelection];
+	}
+}
+
 - (void) applyRules: (id)sender
 {
 	[self eachSession: [self actionMessages] do: ^(Mail2Session *s, NSArray *mine) { [s applyRulesTo: mine]; }];
@@ -1282,6 +1455,36 @@ scroller_for(NSTableView *t, NSRect r)
 		[s createMailboxNamed: name];
 }
 
+/* the search in the field (with a saved search's own, if one is shown) as a smart mailbox */
+- (void) saveSearch: (id)sender
+{
+	if (searchText == nil)
+		return;
+	NSString *q = [current mbid] <= Mail2SavedSearchBase ? [NSString stringWithFormat: @"%@ %@", [current name], searchText] : searchText;
+	NSString *name = Mail2AskString(@"Save Search", @"Name of the smart mailbox:", searchText, @"Save");
+	if (name == nil)
+		return;
+	NSMutableArray *saved = [NSMutableArray arrayWithArray: [[NSUserDefaults standardUserDefaults] arrayForKey: @"Mail2SavedSearches"]];
+	[saved addObject: [NSDictionary dictionaryWithObjectsAndKeys: name, @"Name", q, @"Query", nil]];
+	[[NSUserDefaults standardUserDefaults] setObject: saved forKey: @"Mail2SavedSearches"];
+	[self reloadSidebar];
+}
+
+- (void) deleteSavedSearch
+{
+	NSInteger i = (NSInteger)(Mail2SavedSearchBase - [current mbid]);
+	NSMutableArray *saved = [NSMutableArray arrayWithArray: [[NSUserDefaults standardUserDefaults] arrayForKey: @"Mail2SavedSearches"]];
+	if (i < 0 || i >= (NSInteger)[saved count])
+		return;
+	if (NSRunAlertPanel(@"Delete Smart Mailbox?", @"Delete “%@”? The messages stay where they are.", @"Delete", @"Cancel", nil,
+	    [current displayName]) != NSAlertDefaultReturn)
+		return;
+	[saved removeObjectAtIndex: i];
+	[[NSUserDefaults standardUserDefaults] setObject: saved forKey: @"Mail2SavedSearches"];
+	DESTROY(current);
+	[self reloadSidebar];
+}
+
 - (BOOL) currentIsOwnFolder
 {
 	return current != nil && ![self showingAllInboxes] && [current special] == nil;
@@ -1299,6 +1502,10 @@ scroller_for(NSTableView *t, NSRect r)
 
 - (void) deleteMailbox: (id)sender
 {
+	if ([current mbid] <= Mail2SavedSearchBase) {
+		[self deleteSavedSearch];
+		return;
+	}
 	if (![self currentIsOwnFolder])
 		return;
 	if (NSRunAlertPanel(@"Delete Mailbox?", @"Delete “%@” and every message in it, on the server too? This cannot be undone.",

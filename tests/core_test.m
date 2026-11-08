@@ -887,6 +887,85 @@ main(void)
 		CHECK([sp isCorrect: @"Wrold"] && [wordsFile rangeOfString: @"Wrold"].location != NSNotFound, "Learn Spelling keeps the word");
 	}
 
+	printf("Search filters and Unread\n");
+	{
+		NSDictionary *pq = Mail2ParseSearch(@"from:ann subject:\"trip plans\" has:attachment is:unread after:2026-01-02 zebra");
+		BOOL parsed = [[pq objectForKey: @"From"] containsObject: @"ann"] && [[pq objectForKey: @"Subject"] containsObject: @"trip plans"] &&
+		    [pq objectForKey: @"Attachment"] && [pq objectForKey: @"Unread"] && [pq objectForKey: @"After"] &&
+		    [[pq objectForKey: @"Words"] isEqual: [NSArray arrayWithObject: @"zebra"]];
+		CHECK(parsed, "parsing: filters, a quoted value, a date, a free word");
+		Mail2Session *ss = [[Mail2Session alloc] initWithAccount: a1];
+		[ss refreshMailboxes];
+		wait_for(^BOOL { return ![ss isBusy]; }, 20);
+		Mail2Mailbox *ib = [ss mailboxWithSpecial: @"inbox"];
+		NSData *r1 = Mail2BuildMessage(@"Filter Person <filter@localhost>", [NSArray arrayWithObject: @"test1@localhost"], nil,
+		    @"quarterly numbers ocelot", @"body", nil, nil);
+		NSData *r2 = Mail2BuildMessage(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, @"ocelot sightings", @"b", nil, nil);
+		Mail2SendMessage(a2, r1, [NSArray arrayWithObject: @"test1@localhost"], &err);
+		Mail2SendMessage(a2, r2, [NSArray arrayWithObject: @"test1@localhost"], &err);
+		wait_for(^BOOL {
+			[ss syncMailbox: ib];
+			wait_for(^BOOL { return ![ss isBusy]; }, 10);
+			return [[store searchMailbox: [ib mbid] text: @"ocelot" alsoUids: nil limit: 10] count] == 2;
+		}, 30);
+		CHECK([[store searchMailbox: [ib mbid] text: @"ocelot" alsoUids: nil limit: 10] count] == 2, "a word: both");
+		CHECK([[store searchMailbox: [ib mbid] text: @"ocelot from:filter" alsoUids: nil limit: 10] count] == 1, "and from: narrows it");
+		CHECK([[store searchMailbox: [ib mbid] text: @"subject:\"ocelot sightings\"" alsoUids: nil limit: 10] count] == 1, "subject: with quotes");
+		CHECK([[store searchMailbox: [ib mbid] text: @"ocelot before:2000-01-01" alsoUids: nil limit: 10] count] == 0 &&
+		    [[store searchMailbox: [ib mbid] text: @"ocelot after:2000-01-01" alsoUids: nil limit: 10] count] == 2, "before: and after:");
+		CHECK([[store searchMailbox: Mail2EverywhereID text: @"ocelot is:unread" alsoUids: nil limit: 10] count] == 2,
+		    "is:unread, everywhere (a saved search's scope)");
+		CHECK([[store messagesInMailbox: Mail2UnreadID limit: 1000] count] == (NSUInteger)[store unreadCount] && [store unreadCount] >= 2,
+		    "the Unread smart mailbox: %d", [store unreadCount]);
+		__block NSArray *srv = nil;
+		__block BOOL sd = NO;
+		[ss searchServer: @"ocelot from:filter@localhost" inMailbox: ib completion: ^(NSArray *u, NSString *e4) { srv = [u retain]; sd = YES; }];
+		wait_for(^BOOL { return sd; }, 15);
+		CHECK([srv count] == 1, "the server: TEXT and FROM (%@)", srv);
+		[ss release];
+	}
+
+	printf("Mute and block\n");
+	{
+		Mail2Session *ms = [[Mail2Session alloc] initWithAccount: a1];
+		[ms refreshMailboxes];
+		wait_for(^BOOL { return ![ms isBusy]; }, 20);
+		Mail2Mailbox *ib = [ms mailboxWithSpecial: @"inbox"], *trash = [ms mailboxWithSpecial: @"trash"];
+		[ms syncMailbox: ib];
+		wait_for(^BOOL { return ![ms isBusy]; }, 20);
+		/* a conversation, muted; then a reply in it */
+		NSData *t1 = Mail2BuildMessageEx(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, nil, @"muted topic",
+		    @"first", nil, nil, nil, @"<mute-1@localhost>");
+		Mail2SendMessage(a2, t1, [NSArray arrayWithObject: @"test1@localhost"], &err);
+		wait_for(^BOOL { [ms syncMailbox: ib]; wait_for(^BOOL { return ![ms isBusy]; }, 10);
+			return [[store searchMailbox: [ib mbid] text: @"subject:\"muted topic\"" alsoUids: nil limit: 5] count] == 1; }, 30);
+		Mail2MessageInfo *first = [[store searchMailbox: [ib mbid] text: @"subject:\"muted topic\"" alsoUids: nil limit: 5] lastObject];
+		[store setThread: [first thread] muted: YES];
+		CHECK([store isThreadMuted: [first thread]], "muted (%@)", [first thread]);
+		NSData *t2 = Mail2BuildMessageEx(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, nil, @"Re: muted topic",
+		    @"second", @"<mute-1@localhost>", [NSArray arrayWithObject: @"<mute-1@localhost>"], nil, @"<mute-2@localhost>");
+		Mail2SendMessage(a2, t2, [NSArray arrayWithObject: @"test1@localhost"], &err);
+		wait_for(^BOOL { [ms syncMailbox: ib]; wait_for(^BOOL { return ![ms isBusy]; }, 10);
+			return [[store searchMailbox: [ib mbid] text: @"subject:\"muted topic\"" alsoUids: nil limit: 5] count] == 2; }, 30);
+		NSArray *both = [store searchMailbox: [ib mbid] text: @"subject:\"Re: muted\"" alsoUids: nil limit: 5];
+		CHECK([both count] == 1 && ![[both objectAtIndex: 0] isUnread], "a reply in a muted conversation arrives read");
+		/* a blocked sender */
+		[store setAddress: @"Blocked@Localhost" blocked: YES];
+		NSData *b1 = Mail2BuildMessage(@"blocked@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, @"buy now", @"x", nil, nil);
+		Mail2SendMessage(a2, b1, [NSArray arrayWithObject: @"test1@localhost"], &err);
+		BOOL trashed = wait_for(^BOOL {
+			[ms syncMailbox: ib];
+			[ms syncMailbox: trash];
+			wait_for(^BOOL { return ![ms isBusy]; }, 10);
+			return [[store searchMailbox: [trash mbid] text: @"subject:\"buy now\"" alsoUids: nil limit: 5] count] == 1;
+		}, 30);
+		CHECK(trashed && [[store searchMailbox: [ib mbid] text: @"subject:\"buy now\"" alsoUids: nil limit: 5] count] == 0,
+		    "a blocked sender's mail goes to the Trash (case ignored)");
+		[store setAddress: @"blocked@localhost" blocked: NO];
+		[store setThread: [first thread] muted: NO];
+		[ms release];
+	}
+
 	printf("\n%d checks, %d failed\n", checks, failures);
 	[pool release];
 	return failures ? 1 : 0;

@@ -566,16 +566,25 @@ Mail2ClearDockBadge(void)
 {
 	NSArray *rules = Mail2RulesForAccount([account identifier]);
 	Mail2Store *store = [Mail2Store sharedStore];
-	if ([rules count] == 0)
-		return YES;
 	NSMutableArray *seen = [NSMutableArray array], *flagged = [NSMutableArray array];
 	NSMutableDictionary *moves = [NSMutableDictionary dictionary];	/* destination IMAP name -> uids */
 	NSEnumerator *e = [infos objectEnumerator];
 	Mail2MessageInfo *m;
+	NSString *trashName = [[self mailboxWithSpecial: @"trash"] name];
 	while ((m = [e nextObject]) != nil) {
 		NSEnumerator *re = [rules objectEnumerator];
 		Mail2Rule *r;
 		NSNumber *u = [NSNumber numberWithUnsignedInt: [m uid]];
+		/* before any rule: a blocked sender's mail goes to the Trash, a muted conversation's is marked read */
+		if ([store isAddressBlocked: [m fromAddr]] && trashName != nil && ![trashName isEqualToString: [mb name]]) {
+			NSMutableArray *a = [moves objectForKey: trashName];
+			if (a == nil)
+				[moves setObject: (a = [NSMutableArray array]) forKey: trashName];
+			[a addObject: u];
+			continue;
+		}
+		if ([store isThreadMuted: [m thread]] && [m isUnread])
+			[seen addObject: u];
 		while ((r = [re nextObject]) != nil) {
 			if (![r matches: m account: [account identifier]])
 				continue;

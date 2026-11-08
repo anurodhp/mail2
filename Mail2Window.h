@@ -27,6 +27,7 @@
 	unsigned searchGeneration;
 	NSString *expanded;		/* the opened conversation */
 	NSMutableSet *childRows;	/* rowids of its messages shown under it */
+	NSMutableSet *stickyRows;	/* Unread: rows shown since it was opened, kept when read */
 	BOOL loadingOlder;
 	NSUndoManager *undo;		/* moves (Archive, Delete, Junk, Move To, drops) */
 	NSView *undoBar;		/* Undo Send */
@@ -55,6 +56,9 @@
 - (void) applyRules: (id)sender;
 - (void) showSource: (id)sender;
 - (void) sendNow: (id)sender;
+- (void) saveSearch: (id)sender;
+- (void) toggleMute: (id)sender;
+- (void) toggleBlock: (id)sender;
 - (void) undoSend: (id)sender;
 - (void) outboxChanged: (NSNotification *)n;
 - (void) newMailbox: (id)sender;

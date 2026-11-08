@@ -29,6 +29,11 @@ NSString *Mail2LongDate(NSDate *d);
 /* "12 KB" */
 NSString *Mail2ByteSize(unsigned long long n);
 
+/* A search as typed: free words and from:, to:, subject:, has:attachment, is:unread, is:read, is:flagged,
+ * before:YYYY-MM-DD, after:YYYY-MM-DD ("quotes" for values with spaces). Keys: Words, From, To, Subject (arrays of
+ * strings), Attachment, Unread, Read, Flagged (YES when given), Before, After (NSDate, the start of that day). */
+NSDictionary *Mail2ParseSearch(NSString *text);
+
 /* A mailto: URL (RFC 6068) as {To, Cc, Bcc, Subject, Body}: the address part and its ?query, decoded. */
 NSDictionary *Mail2ParseMailto(NSString *url);
 

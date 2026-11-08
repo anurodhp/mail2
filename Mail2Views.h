@@ -64,6 +64,9 @@
 - (void) showMessage: (Mail2MessageInfo *)m body: (NSString *)body attachments: (NSArray *)att
                 html: (NSString *)html inlineParts: (NSDictionary *)parts;
 - (Mail2MessageInfo *) message;
+/* a conversation: its messages (oldest first) and their parsed bodies, one after the other, the quotes of earlier
+ * ones left out of the later; the header is the newest message's */
+- (void) showConversation: (NSArray *)msgs parsed: (NSArray *)parsed;
 /* the parsed message shown: an Unsubscribe button when it has List-Unsubscribe */
 - (void) setParsed: (Mail2ParsedMessage *)p;
 - (NSTextView *) textView;
@@ -96,6 +99,9 @@ NSString *Mail2AskString(NSString *title, NSString *message, NSString *initial, 
 /* Send Later's question: in an hour, this evening, tomorrow morning, Monday morning, or a date typed; nil if cancelled */
 NSDate *Mail2ChooseSendTime(void);
 Mail2Mailbox *Mail2ChooseMailbox(NSString *title, NSString *message, NSArray *mailboxes, NSString *okTitle);
+
+void Mail2SaveAttachment(Mail2Attachment *a);	/* the save panel, ~/Downloads first */
+void Mail2OpenAttachment(Mail2Attachment *a);	/* a copy opened by the desktop's application for its kind */
 
 /* quote levels coloured, the signature dimmed, links (NSLinkAttributeName) in a plain-text body */
 void Mail2StyleBody(NSMutableAttributedString *as);

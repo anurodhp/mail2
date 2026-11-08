@@ -186,6 +186,8 @@ mailbox_icon(Mail2Mailbox *m)
 	if ([s isEqualToString: @"inbox"] || [s isEqualToString: @"allinboxes"]) return @"sb-inbox";
 	if ([s isEqualToString: @"flaggedsmart"]) return @"sb-flag";
 	if ([s isEqualToString: @"outbox"]) return @"sb-sent";
+	if ([s isEqualToString: @"unreadsmart"]) return @"sb-unread";
+	if ([s isEqualToString: @"savedsearch"]) return @"sb-search";
 	if ([s isEqualToString: @"drafts"]) return @"sb-drafts";
 	if ([s isEqualToString: @"sent"]) return @"sb-sent";
 	if ([s isEqualToString: @"archive"] || [s isEqualToString: @"all"]) return @"sb-archive";
@@ -321,6 +323,12 @@ mailbox_icon(Mail2Mailbox *m)
 		[cs drawAtPoint: NSMakePoint(NSMinX(pill) + 5, NSMinY(pill) + (14 - csz.height) / 2)];
 		senderRight = NSMinX(pill) - 6;
 	}
+	if ([msg thread] && [[Mail2Store sharedStore] isThreadMuted: [msg thread]]) {	/* a muted conversation */
+		NSImage *bell = Mail2Icon(selected ? @"sb-muted-sel" : @"sb-muted");
+		[bell drawInRect: NSMakeRect(senderRight - 13, line1 + 2, 12, 12) fromRect: NSZeroRect
+		    operation: NSCompositeSourceOver fraction: 0.8 respectFlipped: YES hints: nil];
+		senderRight -= 18;
+	}
 	if ([msg hasAttachment]) {
 		NSImage *clip = Mail2Icon(selected ? @"sb-attachment-sel" : @"sb-attachment");
 		[clip drawInRect: NSMakeRect(senderRight - 13, line1 + 2, 12, 12) fromRect: NSZeroRect
@@ -424,7 +432,129 @@ initials(NSString *name)
 
 @end
 
-/* An attachment's button: a click saves it, a drag hands the file to wherever it is dropped (Milan, the desktop) as
+/* ---- attachments: preview, save, open ---- */
+
+void
+Mail2SaveAttachment(Mail2Attachment *a)
+{
+	NSSavePanel *sp = [NSSavePanel savePanel];
+	[sp setTitle: @"Save Attachment"];
+	NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent: @"Downloads"];
+	if (![[NSFileManager defaultManager] fileExistsAtPath: dir])
+		dir = NSHomeDirectory();
+	if ([sp runModalForDirectory: dir file: [a filename]] == NSOKButton) {
+		if (![[a data] writeToFile: [sp filename] atomically: YES])
+			NSRunAlertPanel(@"Cannot Save", @"%@ could not be written.", @"OK", nil, nil, [sp filename]);
+	}
+}
+
+/* a copy under Mail2's tmp folder, opened by the desktop's application for its kind (Preview, Florence...) */
+void
+Mail2OpenAttachment(Mail2Attachment *a)
+{
+	NSString *dir = [[Mail2SupportDirectory() stringByAppendingPathComponent: @"tmp"]
+	    stringByAppendingPathComponent: [[NSProcessInfo processInfo] globallyUniqueString]];
+	[[NSFileManager defaultManager] createDirectoryAtPath: dir withIntermediateDirectories: YES attributes: nil error: NULL];
+	NSString *path = [dir stringByAppendingPathComponent: [[a filename] length] ? [a filename] : @"Attachment"];
+	if (![[a data] writeToFile: path atomically: YES] || ![[NSWorkspace sharedWorkspace] openFile: path])
+		NSRunAlertPanel(@"Cannot Open", @"No application here opens %@. Save it instead.", @"OK", nil, nil, [a filename]);
+}
+
+static BOOL
+is_text_type(NSString *t, NSString *name)
+{
+	NSString *ext = [[name pathExtension] lowercaseString];
+	return [t hasPrefix: @"text/"] || [t isEqualToString: @"application/json"] || [t isEqualToString: @"application/xml"] ||
+	    [t isEqualToString: @"message/rfc822"] || [[NSArray arrayWithObjects: @"txt", @"csv", @"log", @"md", @"json", @"xml",
+	    @"eml", @"ics", @"vcf", @"c", @"h", @"m", @"py", @"sh", nil] containsObject: ext];
+}
+
+@interface Mail2PreviewController : NSObject
+{
+@public
+	NSWindow *window;
+	Mail2Attachment *att;
+}
+@end
+@implementation Mail2PreviewController
+- (void) dealloc { [window release]; [att release]; [super dealloc]; }
+- (void) save: (id)s { Mail2SaveAttachment(att); }
+- (void) open: (id)s { Mail2OpenAttachment(att); }
+- (void) windowWillClose: (NSNotification *)n { [self autorelease]; }
+@end
+
+/* a window showing a picture or a text file, with Save and Open */
+static BOOL
+preview_attachment(Mail2Attachment *a)
+{
+	NSString *t = [[a mimeType] lowercaseString];
+	NSView *content = nil;
+	NSSize want = NSMakeSize(640, 480);
+	if ([t hasPrefix: @"image/"]) {
+		NSImage *img = [[[NSImage alloc] initWithData: [a data]] autorelease];
+		if (img == nil || [img size].width < 1)
+			return NO;
+		NSSize s = [img size];
+		NSRect vis = [[NSScreen mainScreen] visibleFrame];
+		double k = MIN(1.0, MIN((NSWidth(vis) - 120) / s.width, (NSHeight(vis) - 160) / s.height));
+		want = NSMakeSize(MAX(240, s.width * k), MAX(160, s.height * k));
+		NSImageView *iv = [[[NSImageView alloc] initWithFrame: NSMakeRect(0, 0, want.width, want.height)] autorelease];
+		[iv setImage: img];
+		[iv setImageScaling: NSImageScaleProportionallyDown];
+		content = iv;
+	} else if (is_text_type(t, [a filename])) {
+		NSString *str = [[[NSString alloc] initWithData: [a data] encoding: NSUTF8StringEncoding] autorelease];
+		if (str == nil)
+			str = [[[NSString alloc] initWithData: [a data] encoding: NSISOLatin1StringEncoding] autorelease];
+		NSScrollView *sv = [[[NSScrollView alloc] initWithFrame: NSMakeRect(0, 0, want.width, want.height)] autorelease];
+		[sv setHasVerticalScroller: YES];
+		NSTextView *tv = [[[NSTextView alloc] initWithFrame: NSMakeRect(0, 0, [sv contentSize].width, [sv contentSize].height)] autorelease];
+		[tv setEditable: NO];
+		[tv setRichText: NO];
+		[tv setFont: [NSFont userFixedPitchFontOfSize: 11]];
+		[tv setTextContainerInset: NSMakeSize(10, 8)];
+		[tv setVerticallyResizable: YES];
+		[tv setAutoresizingMask: NSViewWidthSizable];
+		[[tv textContainer] setWidthTracksTextView: YES];
+		[tv setString: str ? str : @""];
+		[sv setDocumentView: tv];
+		content = sv;
+	} else
+		return NO;
+	Mail2PreviewController *c = [[Mail2PreviewController alloc] init];
+	c->att = [a retain];
+	NSRect vis = [[NSScreen mainScreen] visibleFrame];
+	NSRect fr = NSMakeRect(NSMidX(vis) - want.width / 2, NSMidY(vis) - want.height / 2, want.width, want.height + 44);
+	c->window = [[NSWindow alloc] initWithContentRect: fr
+	    styleMask: NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask
+	    backing: NSBackingStoreBuffered defer: NO];
+	[c->window setReleasedWhenClosed: NO];
+	[c->window setTitle: [a filename] ? [a filename] : @"Attachment"];
+	[c->window setDelegate: c];
+	NSView *cv = [c->window contentView];
+	[content setFrame: NSMakeRect(0, 44, want.width, want.height)];
+	[content setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
+	[cv addSubview: content];
+	NSButton *save = [[[NSButton alloc] initWithFrame: NSMakeRect(want.width - 196, 8, 90, 28)] autorelease];
+	[save setTitle: @"Save…"];
+	[save setBezelStyle: NSRoundedBezelStyle];
+	[save setTarget: c];
+	[save setAction: @selector(save:)];
+	[save setAutoresizingMask: NSViewMinXMargin];
+	[cv addSubview: save];
+	NSButton *open = [[[NSButton alloc] initWithFrame: NSMakeRect(want.width - 100, 8, 90, 28)] autorelease];
+	[open setTitle: @"Open"];
+	[open setBezelStyle: NSRoundedBezelStyle];
+	[open setTarget: c];
+	[open setAction: @selector(open:)];
+	[open setAutoresizingMask: NSViewMinXMargin];
+	[cv addSubview: open];
+	[c->window makeKeyAndOrderFront: nil];
+	return YES;
+}
+
+
+/* An attachment's button: a click previews it (or offers Save and Open), a drag hands the file to wherever it is dropped (Milan, the desktop) as
  * a copy written under Mail2's tmp folder. */
 @implementation Mail2AttachmentButton
 - (void) dealloc { [attachment release]; [super dealloc]; }
@@ -538,21 +668,20 @@ initials(NSString *name)
 	[self setNeedsDisplay: YES];
 }
 
+/* a click on an attachment: a preview of what can be shown here, else Save or Open */
 - (void) saveAttachment: (NSButton *)b
 {
 	NSInteger i = [b tag];
 	if (i < 0 || i >= (NSInteger)[attachments count])
 		return;
 	Mail2Attachment *a = [attachments objectAtIndex: i];
-	NSSavePanel *sp = [NSSavePanel savePanel];
-	[sp setTitle: @"Save Attachment"];
-	NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent: @"Downloads"];
-	if (![[NSFileManager defaultManager] fileExistsAtPath: dir])
-		dir = NSHomeDirectory();
-	if ([sp runModalForDirectory: dir file: [a filename]] == NSOKButton) {
-		if (![[a data] writeToFile: [sp filename] atomically: YES])
-			NSRunAlertPanel(@"Cannot Save", @"%@ could not be written.", @"OK", nil, nil, [sp filename]);
-	}
+	if (preview_attachment(a))
+		return;
+	NSInteger r = NSRunAlertPanel([a filename], @"%@, %@.", @"Save…", @"Cancel", @"Open", [a mimeType], Mail2ByteSize([[a data] length]));
+	if (r == NSAlertDefaultReturn)
+		Mail2SaveAttachment(a);
+	else if (r == NSAlertOtherReturn)
+		Mail2OpenAttachment(a);
 }
 
 - (void) layoutAttachments
@@ -579,7 +708,7 @@ initials(NSString *name)
 		[b setTag: i];
 		[b setTarget: self];
 		[b setAction: @selector(saveAttachment:)];
-		[b setToolTip: @"Click to save; drag to put it somewhere"];
+		[b setToolTip: @"Click to preview or save; drag to put it somewhere"];
 		[attachBar addSubview: b];
 		x += bf.size.width + 6;
 	}
@@ -631,6 +760,72 @@ initials(NSString *name)
 - (void) showMessage: (Mail2MessageInfo *)m body: (NSString *)body attachments: (NSArray *)att
 {
 	[self showMessage: m body: body attachments: att html: nil inlineParts: nil];
+}
+
+/* ---- a conversation ---- */
+
+/* a reply's own words: without the quote of what it answers ("> " lines and the "On ..., X wrote:" before them) */
+static NSString *
+own_words(NSString *body)
+{
+	NSMutableArray *keep = [NSMutableArray array];
+	NSArray *lines = [body componentsSeparatedByString: @"\n"];
+	NSUInteger i;
+	for (i = 0; i < [lines count]; i++) {
+		NSString *l = [lines objectAtIndex: i];
+		NSString *tr = [l stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]];
+		if ([tr hasPrefix: @">"])
+			continue;
+		if ([tr hasSuffix: @"wrote:"] && i + 1 < [lines count]) {
+			/* "On ... wrote:" followed (after blank lines) by a quote */
+			NSUInteger j = i + 1;
+			while (j < [lines count] && [[[lines objectAtIndex: j] stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]] length] == 0)
+				j++;
+			if (j < [lines count] && [[[lines objectAtIndex: j] stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]] hasPrefix: @">"])
+				continue;
+		}
+		[keep addObject: l];
+	}
+	return [[keep componentsJoinedByString: @"\n"] stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+- (void) showConversation: (NSArray *)msgs parsed: (NSArray *)parsed
+{
+	Mail2MessageInfo *newest = [msgs lastObject];
+	NSMutableArray *allAtt = [NSMutableArray array];
+	NSMutableAttributedString *as = [[[NSMutableAttributedString alloc] init] autorelease];
+	NSDictionary *body = [NSDictionary dictionaryWithObjectsAndKeys: [NSFont systemFontOfSize: 13], NSFontAttributeName,
+	    [NSColor blackColor], NSForegroundColorAttributeName, nil];
+	NSDictionary *who = [NSDictionary dictionaryWithObjectsAndKeys: [NSFont boldSystemFontOfSize: 13], NSFontAttributeName,
+	    [NSColor blackColor], NSForegroundColorAttributeName, nil];
+	NSDictionary *when = [NSDictionary dictionaryWithObjectsAndKeys: [NSFont systemFontOfSize: 11], NSFontAttributeName,
+	    gray(), NSForegroundColorAttributeName, nil];
+	NSDictionary *rule = [NSDictionary dictionaryWithObjectsAndKeys: [NSFont systemFontOfSize: 6], NSFontAttributeName,
+	    [NSColor colorWithCalibratedWhite: 0.80 alpha: 1], NSForegroundColorAttributeName, nil];
+	NSUInteger i;
+	for (i = 0; i < [msgs count]; i++) {
+		Mail2MessageInfo *m = [msgs objectAtIndex: i];
+		id p = i < [parsed count] ? [parsed objectAtIndex: i] : [NSNull null];
+		NSString *text = [p isKindOfClass: [Mail2ParsedMessage class]] ? [p body] : @"(not downloaded)";
+		if (i > 0) {
+			text = own_words(text);
+			[as appendAttributedString: [[[NSAttributedString alloc] initWithString: @"\n\n" attributes: body] autorelease]];
+			[as appendAttributedString: [[[NSAttributedString alloc] initWithString:
+			    [@"" stringByPaddingToLength: 120 withString: @"─" startingAtIndex: 0] attributes: rule] autorelease]];
+			[as appendAttributedString: [[[NSAttributedString alloc] initWithString: @"\n\n" attributes: body] autorelease]];
+		}
+		[as appendAttributedString: MilanDisplayString([m sender], who)];
+		[as appendAttributedString: [[[NSAttributedString alloc] initWithString:
+		    [NSString stringWithFormat: @"   %@\n\n", Mail2LongDate([m date])] attributes: when] autorelease]];
+		NSMutableAttributedString *b = [[MilanDisplayString(text ? text : @"", body) mutableCopy] autorelease];
+		Mail2StyleBody(b);
+		[as appendAttributedString: b];
+		if ([p isKindOfClass: [Mail2ParsedMessage class]])
+			[allAtt addObjectsFromArray: [p attachments]];
+	}
+	[self showMessage: newest body: @"" attachments: allAtt html: nil inlineParts: nil];
+	[[text textStorage] setAttributedString: as];
+	[text scrollRangeToVisible: NSMakeRange([as length], 0)];	/* the newest, at the end */
 }
 
 /* ---- plain text: quotes, signature, links ---- */
