@@ -1,155 +1,128 @@
+<p align="center"><img src="docs/qemu-conversation.png" alt="Mail2 on the Darwin desktop: mailboxes, a conversation of three opened in the message list, the message, and its unread count on Naples' dock" width="100%"></p>
+
 # Mail2
 
-**A small IMAP mail client for GNUstep.** Mail2 is a mail app for the GNUstep + Window Maker desktop on the Raspberry Pi 3 port of Darwin (the sibling repository [iokit](https://github.com/anurodhp/xnu-iokit-pi3)), next to [Milan](https://github.com/anurodhp/milan), [Naples](https://github.com/anurodhp/naples), [Venice](https://github.com/anurodhp/venice), [Rome](https://github.com/anurodhp/rome) and [Florence](https://github.com/anurodhp/florence). It follows on from GNUstep's GNUMail, and is laid out like Apple Mail: mailboxes, the message list and the message, side by side. It is pure AppKit and libdispatch on top of libraries: [libetpan](https://github.com/dinhvh/libetpan) for IMAP, SMTP and MIME, SQLite for the message index and its full-text search, Maildir files for the messages, Mbed TLS for TLS, and for HTML mail [Florence](https://github.com/anurodhp/florence)'s WebKit (its shared `libFloWeb`), or libxml2 to turn it into text when Florence is not installed.
-
-![Mail2 on the Darwin desktop under QEMU: Inbox, a message, and Naples' dock badge with the unread count](docs/qemu-message.png)
-
-## Status
-
-As of November 8, 2026 (version 0.9):
-
-- **Works, tested against a real IMAP/SMTP server** (GreenMail, natively on the Mac, 153 checks in `tests/`): TLS with certificate checks, login, mailbox list with the special mailboxes found, the first sync and later ones, new mail pushed through IDLE, reading (plain text, HTML as text, attachments), read/unread and flags both ways, archive and delete (MOVE, or COPY + EXPUNGE), sending with SMTP (AUTH PLAIN/LOGIN), the Sent copy, the Maildir files and the index; and since 0.2 sending files (binary and non-ASCII names round trip), conversations (References), local and server search, fetching mail older than the first sync, and drafts saved, replaced and removed on the server; since 0.3 All Inboxes across two accounts, and OAuth: XOAUTH2 logins to IMAP and SMTP, token refresh (with Microsoft's refresh-token rotation), the device-code flow, the browser flow with PKCE, a revoked sign-in and Cancel, against a stand-in for the providers (`tests/oauth_mock.py`). TLS was also checked against `imap.gmail.com:993`.
-- **Built for the Pi and run end to end under QEMU** on the real desktop (Window Maker, Naples, Milan): it syncs the Inbox from a server on the host, opens a conversation of three, shows a message and marks it read on the server, updates the dock badge, searches, reopens a draft with its attachment from the server's Drafts and sends it (the server receives it with `plan.pdf`, and Drafts is empty after), and sends a message typed into the compose window (`tools/qemu_shots.sh`, screenshots in `docs/`).
-- **HTML mail in WebKit, under QEMU**: with Florence's engine copied into the image (`FLORENCE_DEPLOY=… tools/qemu_shots.sh`), an HTML message is drawn by WebKit in the message pane (`docs/qemu-html.png`). The first HTML message starts WebKit's processes; under QEMU that held the window for about 17 seconds, once. Not yet measured on the Pi.
-- Things this port taught it: signals interrupt blocking calls on every thread (libetpan's own socket reads gave up on EINTR, so Mail2 has its own stream driver for plain connections too); GNUstep redraws only after an event (Mail2 posts one after background results); and GNUstep's Tab order is not used (the compose window and account panel set their own).
-- **Runs on a real Pi 3** (November 8, 2026): deployed with Naples v0.10 and Florence's libFloWeb, it starts and shows its account panel on the Pi's own display (`docs/pi-account-panel.png`). Under QEMU the panels' contents never reached Xvfb's screen capture, although they were drawn: a limitation of the capture, not of Mail2.
-- Not yet run against real accounts: nothing has signed in to Google or Microsoft for real (that needs client IDs registered with them, below).
-
-![An HTML message drawn by Florence's WebKit inside Mail2](docs/qemu-html.png)
+**A mail client for a small Darwin desktop.** Mail2 is the mail app for the GNUstep + Window Maker desktop on the Raspberry Pi 3 port of Darwin/XNU (the sibling repository [iokit](https://github.com/anurodhp/xnu-iokit-pi3)), next to [Milan](https://github.com/anurodhp/milan), [Naples](https://github.com/anurodhp/naples), [Venice](https://github.com/anurodhp/venice), [Rome](https://github.com/anurodhp/rome) and [Florence](https://github.com/anurodhp/florence). It follows on from GNUstep's GNUMail and is laid out like Apple Mail: mailboxes, the message list and the message, side by side. Pure AppKit + libdispatch on libraries: [libetpan](https://github.com/dinhvh/libetpan) for IMAP, SMTP and MIME, SQLite for the index, Maildir files for the messages, Mbed TLS for TLS, Hunspell for spelling, and Florence's WebKit for HTML mail.
 
 ## What you can do
 
-- Add an IMAP account: the servers are filled in from the address (Gmail, iCloud, Fastmail, Yahoo, Outlook.com, else `imap.`/`smtp.` on its domain) and Sign In checks them before saving. TLS (993/465) or STARTTLS (143/587); plain only if you ask for it.
-- Sign in with a password, or with **OAuth** for Google (Gmail, Google Workspace) and Microsoft (Outlook.com, Hotmail, Microsoft 365). Google opens its sign-in page in the browser; Microsoft shows a short code to enter at microsoft.com/devicelogin, on the Pi or on a phone. See "OAuth" below.
-- Several accounts: Mail2 > Accounts… (Cmd-,) lists them with Add, Edit and Remove. With more than one there is an **All Inboxes** mailbox at the top, and Reply, Archive, Delete and the rest act on each message's own account.
-- Three panes: mailboxes with unread counts (Inbox, Drafts, Sent, Archive, Junk, Trash first, found from the server's SPECIAL-USE flags or the usual names, then your folders), the messages of the mailbox (unread dot, flag, sender, date, subject, the opening lines, a paperclip for attachments), and the message (sender, subject, To and Cc, date, the body, attachments you can save).
-- New mail arrives by itself: IMAP IDLE on the Inbox, and every 2 minutes a STATUS of every other folder, syncing the ones that changed (mail filed there by the server or another program shows without opening them); Get Mail checks now.
-- Resyncs are quick on servers with CONDSTORE (Dovecot, Fastmail, Gmail...): an unchanged mailbox costs nothing, a changed one only its changed flags (CHANGEDSINCE) and its UID list.
-- Reply, Reply All, Forward, New Message (plain text, UTF-8), with To, Cc and Bcc. Replies thread properly (In-Reply-To, References) and mark the original as answered.
-- Addresses complete as you type in To, Cc and Bcc, from the people in your mail (senders, and whom you wrote to), the most frequent first; Tab, Return or a comma keeps the completion.
-- A signature per account (Accounts… > Edit), added under `-- ` to new messages, replies and forwards, and swapped when you change From.
-- Rich text (Format menu): bold, italic, underline, size, links (Cmd-K), bulleted and numbered lists, quote levels; pictures inline (dropped, attached or pasted). Sent as plain text and HTML when there is formatting, plain text otherwise; Format > Make Plain Text, or `Mail2ComposeRich NO` to start plain. Drafts keep their formatting on this machine.
-- Spelling: Hunspell with the en_US dictionary underlines misspelled words as you type (not in quotes, links or addresses); a right-click offers suggestions and Learn Spelling.
-- Undo Send: a message waits 5 seconds (`Mail2UndoSendDelay`) with an Undo button under the mailboxes. Send Later (File menu) schedules it. Every message goes through an Outbox kept on disk: one written offline, or refused, is tried again (30 s, 2, 5, then every 15 minutes), and the Outbox mailbox shows what waits, with Edit, Delete and Send Now.
-- Other addresses per account (aliases, in the account panel): the From menu offers them, and a reply comes from the one the message was sent to.
-- Drag files onto a message to attach them; drag an attachment out of a message to put it in a folder. Pictures attached to plain-text mail show under the text.
-- Attach files (Attach… in the compose window or File > Attach File…; a click on a file's button takes it off). Forward sends the original's attachments along.
-- Drafts: File > Save as Draft (Cmd-S), every minute while there are unsaved changes, and on closing (Save / Don't Save). They go to the server's Drafts mailbox (made if there is none), each save replacing the last; in Drafts, Return, a double click or Message > Edit Draft (Cmd-E) opens one again, Bcc and attachments included, and sending it removes it.
-- Conversations: the list shows each conversation once, newest message first, with its count; selecting it opens it and lists its other messages under it (View > Organize by Conversation turns this off). Archive, Delete, Flag and Read on a closed conversation apply to all of it.
-- Search (Edit > Find…, Cmd-F, or the field in the toolbar): sender, recipients, subject and the text of every downloaded message (SQLite full-text search), at once; then the server (IMAP SEARCH), which also finds mail older than what was synced.
-- Older mail: scrolling to the end of the list fetches the 100 messages before it, again and again (Mailbox > Get Older Messages too).
-- HTML mail is shown as it was meant to look, in WebKit, when Florence is installed (below); else as text.
-- Conversation view: selecting a conversation shows all its messages in the message pane, oldest first, each reply without the quote of what it answers; the newest is at the end and Reply answers it.
-- Unread: a smart mailbox with every unread message (not Trash, Junk, Sent or Drafts); what you read there stays listed until you leave it.
-- Search filters: `from:`, `to:`, `subject:`, `has:attachment`, `is:unread`, `is:read`, `is:flagged`, `before:2026-11-01`, `after:…`, quotes for values with spaces, with free words; locally and on the server (IMAP SEARCH). Mailbox > Save Search as Smart Mailbox keeps one in the sidebar (across every mailbox but Trash and Junk); Delete Mailbox removes it.
-- Mute Conversation: new replies in it arrive read, its rows show a bell-off. Block Sender: their new mail goes straight to the Trash (and, if you choose, what is already here).
-- Attachments: a click previews pictures and text files (with Save and Open), else offers Save or Open with the desktop's application for it.
-- Snooze (Message menu): the message goes to a Snoozed mailbox on the server and comes back to where it was, unread, at the time chosen; Unsnooze brings it back now. Remind Me If No Reply (File menu, while writing): if nobody answers in the days chosen, the message is listed in a Follow Up smart mailbox (Stop Reminding takes it off).
-- Rules on the server: Mail2 > Rules > Put on Server sends the rules and blocked senders to each account's server as a Sieve script over ManageSieve, so they run while Mail2 is closed (Dovecot, Fastmail and others; not Gmail or iCloud).
-- Gmail labels: shown under To and Cc; Message > Label As… adds one (a copy in the label's mailbox), and Copy To… does the same for folders elsewhere.
-- Flagged: a smart mailbox at the top of the sidebar with every flagged message of every account, while there are any.
-- Edit > Undo (Cmd-Z) takes back Archive, Delete, Mark as Junk, Move To and a drop on a mailbox (the messages are found again by Message-ID and moved back); Redo does it again.
-- Unsubscribe: a button in the message header when the mail has List-Unsubscribe. With one-click (RFC 8058) Mail2 asks the list to stop by itself; otherwise it opens the list's page, or a message to its address.
-- Plain-text mail: quoted text in a colour per level, the signature dimmed, and web and mail addresses as links. `mailto:` links fill in To, Cc, Subject and the body.
-- Message > Show Raw Source (Cmd-U): the message as it came.
-- Move To… (Shift-Cmd-M), or drag messages onto a mailbox in the sidebar (within an account). Mark as Junk (Shift-Cmd-J) moves to Junk; in Junk it moves back to the Inbox.
-- Folders: Mailbox > New Mailbox…, Rename Mailbox…, Delete Mailbox… (your own folders; names in any script, sent as IMAP's modified UTF-7; made under `INBOX.` on servers that keep folders there).
-- Rules (Mail2 > Rules…): if From, To/Cc, Subject or any of them contains a text (case and accents ignored), move to a mailbox, mark as read, flag, or move to the Trash; per account or for all. They run on new Inbox mail, in order, a move ending the run, and Message > Apply Rules runs them on the selection.
-- Archive (Gmail: All Mail), Delete (to the Trash; in the Trash, for good), Mark as Read/Unread, Flag. Changes show at once and reach the server in the background.
-- The unread count of the Inbox on Mail2's icon in Naples' dock.
-- `mailto:` links and `Mail2 mailto:someone@example.com` open a compose window.
+**Accounts.** Any IMAP account: the servers are filled in from the address (Gmail, iCloud, Fastmail, Yahoo, Outlook.com, else `imap.`/`smtp.` on its domain), and Sign In checks them before saving.
+
+- Sign in with a password (or app password), or with **OAuth** for Google and Microsoft (see OAuth below). Google opens its page in the browser; Microsoft shows a code to enter at microsoft.com/devicelogin, on the Pi or a phone.
+- Several accounts: Mail2 > Accounts… (Cmd-,) lists them with Add, Edit and Remove. With more than one there is an **All Inboxes** mailbox, and every action goes to each message's own account.
+- Each account can have a signature and other addresses to send from (aliases); a reply comes from the address the message was sent to.
+
+**Reading.** Three panes: mailboxes with unread counts (Inbox, Drafts, Sent, Archive, Junk, Trash first, then your folders), the messages (unread dot, flag, sender, date, subject, opening lines, paperclip), and the message.
+
+- **Conversations**: each conversation is one row with its count; selecting it shows all its messages in the message pane, oldest first, each reply without the quote of what it answers. View > Organize by Conversation turns this off.
+- **HTML mail** is shown in WebKit (Florence's), sealed: no JavaScript, and nothing from the web until you click Load Remote Content, which then loads it through Florence's tracker list. Without Florence, HTML is shown as text.
+- Plain-text mail has its quote levels coloured, the signature dimmed and addresses as links. Pictures attached to it show under the text.
+- **Attachments**: a click previews pictures and text files, else offers Save or Open with the desktop's app for it; drag one out to put it in a folder.
+- **Smart mailboxes** at the top of the sidebar: Unread, Flagged, Follow Up, the Outbox, and searches you save.
+- **Search** (Cmd-F): words, plus `from:`, `to:`, `subject:`, `has:attachment`, `is:unread`, `is:read`, `is:flagged`, `before:2026-11-01` and `after:` — in what is here at once, then on the server, which also finds older mail. Mailbox > Save Search as Smart Mailbox keeps one.
+- **Unsubscribe** button for mail with List-Unsubscribe (one-click where the list offers it). **Mute Conversation**: its replies arrive read. **Block Sender**: their mail goes to the Trash.
+- Message > Show Raw Source. Scrolling to the end of a mailbox fetches the mail before the first sync's 30 days.
+
+**Writing.** New Message, Reply, Reply All and Forward (with the original's attachments), To, Cc and Bcc.
+
+- **Rich text** (Format menu): bold, italic, underline, sizes, links (Cmd-K), bulleted and numbered lists, quote levels, pictures in the text. Sent as plain text and HTML when there is formatting; Format > Make Plain Text for plain.
+- **Spelling** as you type (Hunspell, en_US), with suggestions and Learn Spelling on a right-click.
+- Addresses complete as you type, from the people in your mail.
+- **Attach** with Attach… or by dropping files on the message.
+- **Undo Send** for 5 seconds, **Send Later** at a time you choose, and **Remind Me If No Reply** (listed in Follow Up if nobody answers).
+- Everything goes through an **Outbox** kept on disk: mail written offline, or refused, is sent when it can be.
+- **Drafts** on the server: Save as Draft (Cmd-S), every minute while editing, and on closing; reopen one from Drafts with Return.
+
+**Organizing.** Archive, Delete, Flag, Mark as Read/Unread, Mark as Junk, Move To… (or drag onto a mailbox), all shown at once and done on the server in the background; **Edit > Undo** takes moves back.
+
+- **Snooze**: the message goes to a Snoozed mailbox on the server and comes back, unread, at the time chosen.
+- **Rules** (Mail2 > Rules…): when From, To, Subject or any of them contains a text, move, mark read, flag or trash new mail. **Put on Server** turns them into a Sieve script so the server runs them while Mail2 is closed (Dovecot, Fastmail; not Gmail or iCloud).
+- **Folders**: New, Rename and Delete Mailbox, names in any script. **Gmail labels** are shown on a message, and Label As… adds one.
+
+**Staying in sync.** New mail is pushed to the Inbox (IMAP IDLE), every other folder is checked every 2 minutes, and Get Mail checks now. On servers with CONDSTORE a resync fetches only what changed.
+
+**On the desktop.** The unread count of the Inboxes is a badge on Mail2's icon in Naples' dock. `mailto:` links from Milan and Florence open a message to write.
 
 ## What you cannot do (yet)
 
-- Remote content in HTML mail (images and styles from the web) is not loaded unless you ask: a bar over such a message says so, and its Load Remote Content button loads them for that message, with Florence's content-blocker list applied so the trackers on it still do not load. `Mail2LoadRemoteContent YES` loads them always (with the list). JavaScript never runs. Inline images (`cid:`) are always shown. A list cannot know every sender's own tracking pixel, which is why loading stays off by default.
-- Conversations are made from References and In-Reply-To only; a reply from a program that sends neither stands alone. They are per mailbox (a conversation does not pull in your replies from Sent).
-- No address book beyond completing from your mail. Rules have one condition each. Search in All Inboxes covers what is downloaded (the server search is per mailbox).
-- OAuth needs client IDs of your own (below). Yahoo, iCloud and others still sign in with an app password.
-- Passwords and OAuth refresh tokens are kept in `~/GNUstep/Library/Mail2/Accounts.plist` (mode 600): there is no keychain on this system.
-- Emoji (outside the BMP) show as `?`, as in Milan.
-- A connection the server has closed while idle is noticed on the next command, which is then retried on a fresh connection (a moment's delay).
+- No contacts (addresses complete from your mail only), no calendar invitations, no S/MIME or PGP, no Exchange or JMAP: IMAP and SMTP only.
+- No new-mail notifications beyond the dock badge.
+- OAuth needs client IDs of your own (below); iCloud and Yahoo use app passwords.
+- Conversations are per mailbox and made from References and In-Reply-To only.
+- Rules have one condition each. Search in All Inboxes covers only what is downloaded.
+- Remote content in HTML mail is loaded only through Florence's tracker list, which cannot know every sender's own tracking pixel; that is why it stays off by default.
+- Passwords and OAuth tokens are kept in `~/GNUstep/Library/Mail2/Accounts.plist` (mode 600): there is no keychain on this system.
+- Emoji outside the BMP show as `?`, as in Milan. Spelling is English only.
 - Building needs a Mac and the iokit toolchain. There is no prebuilt package.
 
 ## How it works
 
-- **Network**: each account has a serial dispatch queue that owns one IMAP connection (libetpan's `mailimap`); every command runs there, in order. A second connection IDLEs on the Inbox in a thread of its own and asks the queue to sync when the server reports a change. Results come back to the main thread with `performSelectorOnMainThread:` (the main dispatch queue does not wake GNUstep's run loop) as notifications the window listens to.
-- **TLS**: libetpan does TLS with OpenSSL or GnuTLS, which this system does not have. It takes any transport as a `mailstream_low` driver, so `Mail2TLS.c` is one on Mbed TLS (the library curl uses here), verifying against `/etc/ssl/cert.pem` and the host name. STARTTLS swaps the plain driver for it on the same socket.
-- **SMTP login**: libetpan's SMTP AUTH goes through Cyrus SASL, which this system does not have either; `Mail2SMTP.m` sends AUTH PLAIN or LOGIN itself on libetpan's stream.
-- **Store**: `~/GNUstep/Library/Mail2/Index.sqlite` has a row per mailbox (UIDVALIDITY, UIDNEXT) and per message (envelope, flags, snippet, and the name of its file). A message, once downloaded, is a file in a Maildir per mailbox, `Mail/<account>/<mailbox>/cur/<uidvalidity>_<uid>.mail2:2,<flags>`, renamed when its flags change. The list reads only the index.
-- **Watching and resync**: STATUS (UIDNEXT, MESSAGES, UIDVALIDITY) against what the last sync saw, per folder; with CONDSTORE, SELECT reports HIGHESTMODSEQ, kept per mailbox, and FETCH ... (CHANGEDSINCE) brings only the flags that moved. Untested against a CONDSTORE server so far (GreenMail has none); without it, the full flag pass below.
-- **Sync**: the first time, the UIDs of the last 30 days (`UID SEARCH SINCE`), then envelopes, flags, sizes and BODYSTRUCTURE in batches of 100, newest first. After that, only UIDs above the highest one known, and the flags of the known ones (`UID FETCH n:* FLAGS`), which also shows what was deleted elsewhere. A changed UIDVALIDITY drops the mailbox's copy. The 25 newest messages under 512 KB are downloaded after each sync, for their opening lines and quick reading; the rest when you open them.
-- **Reading**: libetpan's MIME parser; charsets are converted with iconv. With Florence installed, the HTML part is shown in a `FloWebView` from `libFloWeb`: Mail2 `dlopen()`s it the first time it shows an HTML message, so it starts no WebKit until then and nothing at all without Florence, and the library's code is shared with Florence. The view is sealed: no JavaScript (not even `<script>` parsing), an ephemeral network session whose every request goes to a proxy that does not exist (nothing remote loads, so no read receipts by tracking pixel), `cid:` images served from the message, and a clicked link opens in Florence (`mailto:` in a compose window). Without Florence, the plain part is shown (`Mail2PreferPlainText`) or the HTML through libxml2's HTML parser as text. Text is drawn with Milan's per-run font fallback, so names and subjects in other scripts show.
-- **Conversations and search**: each message's row gets a conversation key when it arrives (the key of a known message it refers to or that refers to it, else the first id it refers to, else its own Message-ID), so the list is one query (SQLite window functions). Downloaded bodies go into an FTS4 table; a search is a `LIKE` over the envelope plus a `MATCH` of word prefixes, then IMAP `UID SEARCH TEXT`, whose matches without a row get one.
-- **Badge**: after every change Mail2 posts the distributed notification `NaplesBadgeChanged` with the unread count of its Inboxes; Naples draws it on the icon and clears it when Mail2 quits.
+Each account has a serial dispatch queue that owns one IMAP connection; every command runs there, in order, and results reach the main thread with `performSelectorOnMainThread:` (the main dispatch queue does not wake GNUstep's run loop). Changes are written to the index first, so the window shows them before the server hears of them.
+
+- **TLS**: libetpan's TLS is OpenSSL or GnuTLS, which this system does not have. It takes any transport as a `mailstream_low` driver, so `Mail2TLS.c` is one on Mbed TLS, verifying against `/etc/ssl/cert.pem` and the host name; STARTTLS swaps it in on the same socket. A plain-socket driver of its own retries reads interrupted by signals, which on this system reach every thread.
+- **Logins**: AUTH PLAIN/LOGIN and XOAUTH2 are written on libetpan's streams, as its SMTP AUTH needs Cyrus SASL, which this system does not have. OAuth tokens come over HTTPS through the same Mbed TLS stream.
+- **Store**: `~/GNUstep/Library/Mail2/Index.sqlite` has a row per mailbox and per message (envelope, flags, snippet, conversation key, the name of its file); downloaded messages are files in a Maildir per mailbox, renamed when their flags change. Bodies go into an FTS4 table for search. The list reads only the index; conversations are one query with window functions.
+- **Sync**: the first time, the last 30 days (at most 500 messages); then only UIDs above the highest known, and the flags of the known ones — with CONDSTORE only the ones changed since the last sync. A second connection IDLEs on the Inbox in a thread of its own; every 2 minutes a STATUS of each other folder finds the ones that changed.
+- **HTML**: `libFloWeb`, Florence's engine glue as a shared library, is `dlopen`ed the first time an HTML message is shown, so Mail2 starts no WebKit until then and nothing without Florence. Its `FloWebView` is sealed: no JavaScript, an ephemeral network session behind a proxy that does not exist, `cid:` images served from the message. Load Remote Content remakes it with a network session of its own and Florence's content-blocker list.
+- **Outgoing mail**: the compose window builds the message (plain text, or plain text and HTML from the formatted text, pictures by `cid:`) with libetpan's MIME writer and hands it to the Outbox, which sends it through the account's queue when it is due and keeps it on disk until the server takes it.
+- **GNUstep on this desktop**: it redraws only after an event, so Mail2 posts one after background results; its Tab order is not used, so the compose window and account panel set their own.
+- **Badge**: after every change Mail2 posts the distributed notification `NaplesBadgeChanged`, which Naples draws on the icon (it needs `gdnc`, which the session starts).
 
 ## OAuth
 
-Google and Microsoft give access to mail only to applications registered with them, so Mail2 uses client IDs you register (free; they are not shipped in Mail2):
+Google and Microsoft give mail access only to applications registered with them, so Mail2 uses client IDs you register (free, and not shipped in Mail2).
 
-- **Google**: in the Google Cloud console, create a project, enable the Gmail API, set up the OAuth consent screen (add yourself as a test user while it is in testing), and create an OAuth client of type *Desktop app*. Then `defaults write Mail2 Mail2GoogleClientID <client id>` and `defaults write Mail2 Mail2GoogleClientSecret <client secret>` (Google calls a desktop app's secret not secret; it is required all the same). Mail2 asks for the scope `https://mail.google.com/`, the one IMAP and SMTP accept.
-- **Microsoft**: in Microsoft Entra (portal.azure.com, App registrations), register an application for *personal Microsoft accounts and any organizational directory*, turn on *Allow public client flows* (Authentication), and add the delegated permissions `IMAP.AccessAsUser.All`, `SMTP.Send` and `offline_access` (Office 365 Exchange Online). Then `defaults write Mail2 Mail2MicrosoftClientID <application id>`. Microsoft 365 tenants must also allow SMTP AUTH for the mailbox.
+- **Google**: in the Google Cloud console, create a project, enable the Gmail API, set up the consent screen (with yourself as a test user) and create an OAuth client of type *Desktop app*. Then `defaults write Mail2 Mail2GoogleClientID <id>` and `defaults write Mail2 Mail2GoogleClientSecret <secret>`.
+- **Microsoft**: in Microsoft Entra (App registrations), register an application for personal and organizational accounts, allow public client flows, and add the delegated permissions `IMAP.AccessAsUser.All`, `SMTP.Send` and `offline_access`. Then `defaults write Mail2 Mail2MicrosoftClientID <id>`.
 
-How it works: Google's sign-in is the authorization-code flow with PKCE, the browser coming back to a one-time listener on 127.0.0.1 (Google does not allow the mail scope in its device flow). Microsoft's is the device-code flow. Either ends with a refresh token, stored with the account; access tokens are fetched when needed (HTTPS through Mail2's own Mbed TLS stream) and kept in memory until a minute before they expire. IMAP logs in with `AUTHENTICATE XOAUTH2`, SMTP with `AUTH XOAUTH2`. Microsoft's new refresh token after each renewal is saved at once. A revoked sign-in shows as an error naming the account; Edit it in Accounts… to sign in again.
+Google's sign-in is the authorization-code flow with PKCE, the browser coming back to a one-time listener on 127.0.0.1; Microsoft's is the device-code flow. Either ends with a refresh token kept with the account; access tokens are fetched when needed and kept in memory. Microsoft's new refresh token after each renewal is saved at once.
 
 ## Building
 
-You need a Mac with **Xcode 12** (the iPhoneOS SDK the port is built with) and a current Xcode for its linker, and the [iokit](https://github.com/anurodhp/xnu-iokit-pi3) repository checked out next to this one (`../iokit`, or set `IOKIT_DIR`) with its toolchain, X11 and GNUstep built, and Mbed TLS (`build_mbedtls.sh`). Then:
+You need a Mac with **Xcode 12** (the iPhoneOS SDK the port is built with) and a current Xcode for its linker, and the [iokit](https://github.com/anurodhp/xnu-iokit-pi3) repository checked out next to this one (`../iokit`, or set `IOKIT_DIR`) with its toolchain, X11, GNUstep and Mbed TLS already built.
 
 ```sh
-./build.sh            # builds libetpan and SQLite if needed (iokit's build_libetpan.sh, build_sqlite.sh), then Mail2.app
-./build.sh deploy     # build, then copy Mail2.app, libetpan, SQLite and Mbed TLS to the Pi
+./build.sh            # builds libetpan, SQLite and Hunspell if needed (iokit's scripts), then Mail2.app
+./build.sh deploy     # build, then copy Mail2.app and its libraries to the Pi
 ```
 
-`deploy` uses `DEPLOY_HOST` (default `root@10.0.0.142`). The dock badge needs Naples v0.10 or later. HTML mail in WebKit needs Florence with `libFloWeb` (Florence after v0.3.0) deployed on the Pi; without it Mail2 shows HTML as text.
+`deploy` uses `DEPLOY_HOST` (default `root@10.0.0.142`) and stops a running Mail2 first. The dock badge needs Naples v0.10 or later; HTML mail in WebKit needs Florence with `libFloWeb` on the Pi (without it Mail2 shows HTML as text).
 
 ## Testing
 
 ```sh
-tests/run_host_tests.sh   # the mail core, natively on the Mac, against GreenMail (needs java and cmake)
-tools/qemu_shots.sh       # the app on the Darwin desktop under QEMU, syncing from GreenMail on the host; screenshots in docs/
+tests/run_host_tests.sh   # the mail core, natively on the Mac, against a real IMAP/SMTP server (GreenMail; needs java and cmake)
+tools/qemu_shots.sh       # the app on the Darwin desktop under QEMU, with screenshots in docs/
 ```
 
-`run_host_tests.sh` builds libetpan and Mbed TLS for the host from iokit's pinned sources and compiles Mail2's own core files (TLS, IMAP, SMTP, MIME, store, session) with Apple's Foundation, then runs `tests/core_test.m`: header decoding, building and sending a message, IMAP login, list, search, fetch, MIME and HTML parsing, the Maildir and index, flags, MOVE, EXPUNGE, IDLE, and the session's sync, push and local-first changes. GreenMail (a Java test server) is fetched once, pinned by checksum.
+`run_host_tests.sh` builds libetpan, Mbed TLS and Hunspell for the Mac from iokit's pinned sources, compiles Mail2's own core with Apple's Foundation and runs 153 checks against GreenMail (fetched once, pinned by checksum), with small stand-ins for the OAuth providers (`tests/oauth_mock.py`) and for ManageSieve (`tests/sieve_mock.py`): TLS, logins, sync and IDLE, MIME and HTML, sending, drafts, the Outbox, rich text, spelling, search, conversations, rules, snooze, folders, and more. `qemu_shots.sh` boots the real desktop under QEMU and drives Mail2 against GreenMail on the host: syncing, conversations, search, reopening a draft and sending it, typing and sending a new message, HTML mail in WebKit, and two accounts.
 
-On the Pi, `MAIL2_DEBUG=1 /Applications/Mail2.app/Mail2` logs the IMAP and SMTP conversation (passwords are left out).
+As of November 8, 2026 (version 0.9) Mail2 runs on a real Pi 3 with Naples and Florence; it has not yet been used with a real Google or Microsoft account, nor tested against a server with CONDSTORE. On the Pi, `MAIL2_DEBUG=1 /Applications/Mail2.app/Mail2` logs the IMAP and SMTP conversation (passwords are left out).
 
 ## Defaults
 
-| Default | What |
-|---|---|
-| `Mail2SyncDays` | days of mail fetched when a mailbox is first opened (30) |
-| `Mail2ShowHTML` | `NO`: never use WebKit, show HTML mail as text (default `YES`) |
-| `Mail2PreferPlainText` | without WebKit: `NO` shows the HTML part, as text, when a message has both (default `YES`) |
-| `Mail2Conversations` | `NO`: one row per message (View > Organize by Conversation) |
-| `Mail2LoadRemoteContent` | `YES`: load HTML mail's images and styles from the web without asking (Florence's tracker list still applies; default `NO`) |
-| `Mail2GoogleClientID`, `Mail2GoogleClientSecret` | your Google OAuth client (see OAuth) |
-| `Mail2MicrosoftClientID` | your Microsoft OAuth application (see OAuth) |
-| `Mail2Debug` | `YES` logs the IMAP and SMTP conversation (also `MAIL2_DEBUG=1`) |
-
-`MAIL2_FLOWEB` in the environment points at another `libFloWeb.1.dylib` than `/usr/local/lib`'s.
+`Mail2SyncDays` (30), `Mail2Conversations`, `Mail2ComposeRich`, `Mail2UndoSendDelay` (5 seconds; 0 sends at once), `Mail2ShowHTML`, `Mail2PreferPlainText` (without WebKit), `Mail2LoadRemoteContent`, `Mail2GoogleClientID`, `Mail2GoogleClientSecret`, `Mail2MicrosoftClientID`, `Mail2Debug`. `MAIL2_FLOWEB` in the environment points at another `libFloWeb.1.dylib`.
 
 ## Layout
 
 | | |
 |---|---|
 | `main.m` | application, menus, accounts |
-| `Mail2Window.m`, `Mail2Views.m` | the viewer: toolbar, the three panes, the row and header drawing |
-| `Mail2Compose.m`, `Mail2AccountPanel.m` | the compose window, the account panel and the Accounts window |
-| `Mail2Session.m` | an account's queue, sync, IDLE thread, local-first changes, the dock badge |
+| `Mail2Window.m`, `Mail2Views.m` | the viewer: toolbar, the three panes, rows, header, attachments, smart mailboxes |
+| `Mail2Compose.m`, `Mail2RichText.m`, `Mail2Spell.m` | the compose window, formatted text to HTML, spelling (Hunspell) |
+| `Mail2AccountPanel.m`, `Mail2Account.m`, `Mail2OAuth.m` | the account panel and Accounts window, settings, OAuth |
+| `Mail2Session.m` | an account's queue: sync, IDLE, folder watching, moves, drafts, sending |
 | `Mail2IMAP.m`, `Mail2SMTP.m`, `Mail2TLS.c` | IMAP and SMTP over libetpan, TLS on Mbed TLS |
 | `Mail2Message.m` | reading (MIME, HTML to text) and building messages |
 | `Mail2Store.m` | the SQLite index and the Maildir files |
-| `Mail2Account.m`, `Mail2Util.m`, `MilanText.m` | settings, helpers, font fallback (from Milan) |
-| `Mail2RichText.m`, `Mail2Outbox.m`, `Mail2Spell.m` | formatted text to HTML, the Outbox, spelling (Hunspell) |
+| `Mail2Outbox.m`, `Mail2Snooze.m` | the Outbox; snooze and follow-up reminders |
+| `Mail2Rules.m`, `Mail2RulesWindow.m`, `Mail2Sieve.m` | rules, their window, and Sieve over ManageSieve |
+| `Mail2Util.m`, `MilanText.m` | helpers, font fallback (from Milan) |
 | `dict/` | the en_US Hunspell dictionary and its licence |
-| `Mail2Rules.m`, `Mail2RulesWindow.m`, `Mail2Sieve.m` | rules for new mail, their window, and the same as Sieve over ManageSieve |
-| `Mail2Snooze.m` | snoozed messages and follow-up reminders |
-| `Mail2OAuth.m` | OAuth sign-in (browser with PKCE, device code), token refresh, the small HTTPS client |
-| `icons/`, `tools/make_icons.sh`, `tools/make_icon.m` | Lucide glyphs, the app icon (a letter with a stamp and a HELLO FROM BOSTON postmark, on blue), and their generators |
-| `tests/` | the host test of the mail core |
-| `tools/qemu_shots.sh` | the QEMU end-to-end run |
-| `docs/plan.md` | the plan |
+| `icons/`, `tools/make_icons.sh`, `tools/make_icon.m` | Lucide glyphs, the app icon (a letter with a stamp and a HELLO FROM BOSTON postmark) and their generators |
+| `tests/`, `tools/qemu_shots.sh` | the host tests and the QEMU run |
+| `docs/` | the plan and screenshots |
 
 ## Licence
 
-MIT, see `LICENSE`. The icons are Lucide (ISC). Mail2 links libetpan (BSD-3-Clause), SQLite (public domain), Mbed TLS (Apache-2.0), libxml2 (MIT) and Hunspell (used under the MPL 1.1), which keep their own licences; its en_US dictionary (`dict/`) is SCOWL's, under the notices in `dict/README_en_US.txt`. HTML mail is shown by Florence's WebKit (LGPL), loaded at run time.
+Mail2 is MIT licensed, see `LICENSE`. The icons are Lucide (ISC). It links libetpan (BSD-3-Clause), SQLite (public domain), Mbed TLS (Apache-2.0), libxml2 (MIT) and Hunspell (used under the MPL 1.1), which keep their own licences; the en_US dictionary in `dict/` is SCOWL's, under the notices in `dict/README_en_US.txt`. HTML mail is shown by Florence's WebKit (LGPL), loaded at run time.
