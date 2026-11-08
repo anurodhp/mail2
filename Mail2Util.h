@@ -12,6 +12,10 @@ void Mail2WakeEventHandled(void);
 
 /* ~/GNUstep/Library/Mail2, created on first use */
 NSString *Mail2SupportDirectory(void);
+/* a downloaded message's file: mapped when large (its pages then come from the kernel's file cache, and can be
+ * dropped and read again, instead of a private copy), read when small. Only for Mail2's own Maildir files, which are
+ * written whole and renamed into place, never changed in place: a mapped file cut short under it would be a crash. */
+NSData *Mail2ReadMessageFile(NSString *path);
 
 /* An RFC 2047 header value ("=?utf-8?B?...?=" words, or raw 8-bit text) as a string; nil in, nil out. */
 NSString *Mail2DecodeHeader(const char *s);

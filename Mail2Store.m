@@ -229,6 +229,9 @@ special_rank(NSString *s)
 	db = h;
 	sqlite3_busy_timeout(DB, 5000);
 	[self exec: "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;"];
+	/* reads through a mapping of the file (the kernel's cache, no copy into SQLite's own), temporary tables and sorts in
+	 * memory rather than on the SD card, and a 4 MB page cache (the default is 2 MB) */
+	[self exec: "PRAGMA mmap_size=67108864; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-4096;"];
 	[self exec:
 	    "CREATE TABLE IF NOT EXISTS mailboxes ("
 	    "  id INTEGER PRIMARY KEY, account TEXT NOT NULL, name TEXT NOT NULL, delim TEXT, special TEXT,"

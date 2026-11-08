@@ -88,8 +88,11 @@ OA_PID=$!
 rm -rf "$B/sieve"; mkdir -p "$B/sieve"
 python3 -I "$ROOT/tests/sieve_mock.py" "$B/sieve" > "$B/sieve_mock.log" 2>&1 &
 SV_PID=$!
-trap 'kill $GM_PID $OA_PID $SV_PID 2>/dev/null || true' EXIT
-for i in $(seq 1 60); do nc -z 127.0.0.1 3143 2>/dev/null && nc -z 127.0.0.1 3025 2>/dev/null && nc -z 127.0.0.1 3080 2>/dev/null && nc -z 127.0.0.1 4190 2>/dev/null && break; sleep 0.5; done
+# an IMAP stand-in with LIST-STATUS, which GreenMail lacks (tests/imap_list_status_mock.py)
+python3 -I "$ROOT/tests/imap_list_status_mock.py" > "$B/list_status_mock.log" 2>&1 &
+LS_PID=$!
+trap 'kill $GM_PID $OA_PID $SV_PID $LS_PID 2>/dev/null || true' EXIT
+for i in $(seq 1 60); do nc -z 127.0.0.1 3143 2>/dev/null && nc -z 127.0.0.1 3025 2>/dev/null && nc -z 127.0.0.1 3080 2>/dev/null && nc -z 127.0.0.1 4190 2>/dev/null && nc -z 127.0.0.1 3144 2>/dev/null && break; sleep 0.5; done
 
 rm -rf "$B/support"; mkdir -p "$B/support"
 SIEVE_OUT="$B/sieve" MAIL2_SUPPORT_DIR="$B/support" NETWORK_TLS="${NETWORK_TLS:-1}" "$B/core_test"

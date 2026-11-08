@@ -506,6 +506,131 @@ uids_from_search(clist *res)
 	return d;
 }
 
+/* One untagged "* STATUS name (ATT n ...)" line, the name an atom, a quoted string or a literal (its bytes then begin
+ * the next line, given as *next): the name and its {UIDNEXT, MESSAGES, UIDVALIDITY}, or nil for any other line. */
+NSDictionary *
+Mail2ParseStatusLine(NSString *line, NSString *next, NSString **name)
+{
+	if (![[line uppercaseString] hasPrefix: @"* STATUS "])
+		return nil;
+	NSString *rest = [line substringFromIndex: 9], *n = nil;
+	if ([rest hasPrefix: @"\""]) {
+		NSMutableString *m = [NSMutableString string];
+		NSUInteger i;
+		for (i = 1; i < [rest length]; i++) {
+			unichar c = [rest characterAtIndex: i];
+			if (c == '\\' && i + 1 < [rest length])
+				c = [rest characterAtIndex: ++i];
+			else if (c == '"')
+				break;
+			[m appendFormat: @"%C", c];
+		}
+		if (i >= [rest length])
+			return nil;
+		n = m;
+		rest = [rest substringFromIndex: i + 1];
+	} else if ([rest hasPrefix: @"{"]) {
+		/* {n} ends this line; the name is the next line's first n bytes (names hold no line breaks) */
+		NSUInteger len = (NSUInteger)[[rest substringFromIndex: 1] integerValue];
+		NSData *nd = [next dataUsingEncoding: NSUTF8StringEncoding];
+		if (next == nil || [nd length] < len)
+			return nil;
+		n = [[[NSString alloc] initWithData: [nd subdataWithRange: NSMakeRange(0, len)] encoding: NSUTF8StringEncoding] autorelease];
+		rest = [[[NSString alloc] initWithData: [nd subdataWithRange: NSMakeRange(len, [nd length] - len)]
+		    encoding: NSUTF8StringEncoding] autorelease];
+	} else {
+		NSRange sp = [rest rangeOfString: @" "];
+		if (sp.location == NSNotFound)
+			return nil;
+		n = [rest substringToIndex: sp.location];
+		rest = [rest substringFromIndex: sp.location];
+	}
+	NSRange open = [rest rangeOfString: @"("], close = [rest rangeOfString: @")" options: NSBackwardsSearch];
+	if (n == nil || open.location == NSNotFound || close.location == NSNotFound || close.location < open.location)
+		return nil;
+	NSArray *w = [[rest substringWithRange: NSMakeRange(open.location + 1, close.location - open.location - 1)]
+	    componentsSeparatedByString: @" "];
+	NSMutableDictionary *d = [NSMutableDictionary dictionary];
+	NSUInteger i;
+	for (i = 0; i + 1 < [w count]; i += 2) {
+		NSString *k = [[w objectAtIndex: i] uppercaseString];
+		if ([k isEqualToString: @"UIDNEXT"] || [k isEqualToString: @"MESSAGES"] || [k isEqualToString: @"UIDVALIDITY"])
+			[d setObject: [NSNumber numberWithUnsignedInt: (unsigned)[[w objectAtIndex: i + 1] longLongValue]] forKey: k];
+	}
+	*name = n;
+	return d;
+}
+
+/* A command whose answer is untagged STATUS lines, read here: libetpan keeps only the last of them. Sent and read on
+ * libetpan's own stream, with a tag of Mail2's that libetpan's never are. */
+- (NSDictionary *) statusResponsesTo: (NSString *)command error: (NSString **)err
+{
+	if (![self connect: err])
+		return nil;
+	mailstream *st = IMAP->imap_stream;
+	NSString *tag = @"m2s", *cmd = [NSString stringWithFormat: @"%@ %@\r\n", tag, command];
+	if (Mail2Debug())
+		fprintf(stderr, "imap C: %s", [cmd UTF8String]);
+	NSData *cd = [cmd dataUsingEncoding: NSUTF8StringEncoding];
+	if (mailstream_write(st, [cd bytes], [cd length]) < 0 || mailstream_flush(st) < 0) {
+		*err = @"The connection to the server was lost.";
+		[self failed: MAILIMAP_ERROR_STREAM];
+		return nil;
+	}
+	NSMutableDictionary *r = [NSMutableDictionary dictionary];
+	MMAPString *buf = mmap_string_new("");
+	NSString *pending = nil;
+	for (;;) {
+		char *l = mailstream_read_line_remove_eol(st, buf);
+		if (l == NULL) {
+			*err = @"The connection to the server was lost.";
+			[self failed: MAILIMAP_ERROR_STREAM];
+			r = nil;
+			break;
+		}
+		NSString *line = [NSString stringWithUTF8String: l];
+		if (line == nil)
+			line = @"";
+		if (Mail2Debug())
+			fprintf(stderr, "imap S: %s\n", l);
+		if (pending != nil) {	/* the rest of a STATUS whose name was a literal */
+			NSString *name = nil;
+			NSDictionary *d = Mail2ParseStatusLine(pending, line, &name);
+			if (d)
+				[r setObject: d forKey: name];
+			DESTROY(pending);
+			continue;
+		}
+		if ([line hasPrefix: [tag stringByAppendingString: @" "]]) {
+			if (![[[line substringFromIndex: [tag length] + 1] uppercaseString] hasPrefix: @"OK"]) {
+				*err = [NSString stringWithFormat: @"The server refused %@: %@", command, line];
+				r = nil;
+			}
+			break;
+		}
+		if ([[line uppercaseString] hasPrefix: @"* STATUS "] && [line hasSuffix: @"}"]) {
+			pending = [line retain];
+			continue;
+		}
+		NSString *name = nil;
+		NSDictionary *d = Mail2ParseStatusLine(line, nil, &name);
+		if (d)
+			[r setObject: d forKey: name];
+	}
+	[pending release];
+	mmap_string_free(buf);
+	return r;
+}
+
+- (NSDictionary *) statusOfAll: (NSString **)err
+{
+	if (![self connect: err])
+		return nil;
+	if (![self hasCapability: @"LIST-STATUS"])
+		return nil;
+	return [self statusResponsesTo: @"LIST \"\" \"*\" RETURN (STATUS (UIDNEXT MESSAGES UIDVALIDITY))" error: err];
+}
+
 - (NSArray *) search: (struct mailimap_search_key *)key what: (NSString *)what error: (NSString **)err
 {
 	clist *res = NULL;

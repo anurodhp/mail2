@@ -371,15 +371,24 @@ Mail2ClearDockBadge(void)
 }
 
 /* every folder but the Inbox (IDLE watches that): STATUS each one synced before, and sync the ones whose UIDNEXT,
- * message count or UIDVALIDITY moved */
+ * message count or UIDVALIDITY moved. With LIST-STATUS (Dovecot, Cyrus/Fastmail) that is one command for all of them
+ * instead of one per folder. */
 - (BOOL) q_watchFolders: (NSString **)err
 {
 	NSEnumerator *e = [[[Mail2Store sharedStore] mailboxesForAccount: [account identifier]] objectEnumerator];
 	Mail2Mailbox *mb;
+	NSDictionary *all = [imap statusOfAll: err];
+	if (all == nil && *err != nil) {
+		if (![imap isConnected])
+			return NO;
+		*err = nil;	/* refused: one STATUS each, as without it */
+	}
 	while ((mb = [e nextObject]) != nil) {
 		if (![mb selectable] || [[mb special] isEqualToString: @"inbox"] || mb->uidValidity == 0)
 			continue;
-		NSDictionary *st = [imap statusOf: [mb name] error: err];
+		NSDictionary *st = all ? [all objectForKey: [mb name]] : [imap statusOf: [mb name] error: err];
+		if (all != nil && st == nil)
+			continue;	/* not listed: gone, and the next mailbox list drops it */
 		if (st == nil) {
 			if (![imap isConnected])
 				return NO;
@@ -403,9 +412,12 @@ Mail2ClearDockBadge(void)
 	[self run: nil work: ^BOOL (NSString **err) { return [self q_watchFolders: err]; }];
 }
 
+/* While IDLE is live the server says when the Inbox changes (new mail, flags set elsewhere, expunges), so the timer
+ * leaves it alone: without CONDSTORE a resync fetches the flags of every message known, every 2 minutes. */
 - (void) timerFired: (NSTimer *)t
 {
-	[self checkInboxAnd: nil];
+	if (!idleLive)
+		[self checkInboxAnd: nil];
 	[self watchFolders];
 }
 
@@ -417,9 +429,14 @@ Mail2ClearDockBadge(void)
 		Mail2Mailbox *inbox = [self mailboxWithSpecial: @"inbox"];
 		return inbox == nil || [self q_sync: inbox error: err];
 	}];
-	if (timer == nil)
-		timer = [[NSTimer scheduledTimerWithTimeInterval: CHECK_INTERVAL target: self selector: @selector(timerFired:)
-		    userInfo: nil repeats: YES] retain];
+	if (timer == nil) {
+		/* on a grid shared by every account (multiples of 2 minutes), so their checks share one wakeup */
+		NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+		NSDate *first = [NSDate dateWithTimeIntervalSinceReferenceDate: (floor(now / CHECK_INTERVAL) + 1) * CHECK_INTERVAL];
+		timer = [[NSTimer alloc] initWithFireDate: first interval: CHECK_INTERVAL target: self selector: @selector(timerFired:)
+		    userInfo: nil repeats: YES];
+		[[NSRunLoop currentRunLoop] addTimer: timer forMode: NSDefaultRunLoopMode];
+	}
 	if (idleThread == nil && pipe(idleWake) == 0) {
 		fcntl(idleWake[0], F_SETFL, O_NONBLOCK);
 		fcntl(idleWake[1], F_SETFL, O_NONBLOCK);
@@ -447,6 +464,7 @@ Mail2ClearDockBadge(void)
 	Mail2IMAP *conn = [[Mail2IMAP alloc] initWithAccount: account];
 	int backoff = 15;
 	int wfd = idleWake[0], wfd1 = idleWake[1];
+	BOOL idled = NO;
 	[self retain];
 	while (!stopping) {
 		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
@@ -459,6 +477,12 @@ Mail2ClearDockBadge(void)
 			[pool release];
 			break;
 		}
+		if (ok) {
+			if (idled)	/* back after a gap: what happened in it */
+				Mail2RunOnMain(^{ [self checkInboxAnd: nil]; });
+			idled = YES;
+			idleLive = YES;
+		}
 		while (ok && !stopping) {
 			int r = [conn idleWithWakeFd: wfd timeout: IDLE_TIMEOUT error: &err];
 			char buf[16];
@@ -470,6 +494,7 @@ Mail2ClearDockBadge(void)
 				Mail2RunOnMain(^{ [self checkInboxAnd: nil]; });
 			}
 		}
+		idleLive = NO;
 		[conn disconnect];
 		[pool release];
 		if (stopping)

@@ -1113,6 +1113,57 @@ main(void)
 		[ws release];
 	}
 
+	printf("LIST-STATUS\n");
+	{
+		NSString *nm = nil;
+		NSDictionary *d = Mail2ParseStatusLine(@"* STATUS \"[Gmail]/Sent Mail\" (UIDNEXT 44 MESSAGES 7 UIDVALIDITY 3)", nil, &nm);
+		BOOL q = [nm isEqualToString: @"[Gmail]/Sent Mail"] && [[d objectForKey: @"UIDNEXT"] intValue] == 44 &&
+		    [[d objectForKey: @"MESSAGES"] intValue] == 7 && [[d objectForKey: @"UIDVALIDITY"] intValue] == 3;
+		CHECK(q, "a quoted name: %@ %@", nm, d);
+		d = Mail2ParseStatusLine(@"* STATUS Archive (MESSAGES 2 UIDNEXT 9 UIDVALIDITY 1)", nil, &nm);
+		BOOL atom = [nm isEqualToString: @"Archive"] && [[d objectForKey: @"UIDNEXT"] intValue] == 9;
+		CHECK(atom, "an atom, attributes in any order");
+		d = Mail2ParseStatusLine(@"* STATUS \"a \\\"b\\\" c\" (UIDNEXT 1)", nil, &nm);
+		BOOL esc = [nm isEqualToString: @"a \"b\" c"];
+		CHECK(esc, "escapes in a quoted name: %@", nm);
+		d = Mail2ParseStatusLine(@"* STATUS {5}", @"Notes (UIDNEXT 3 MESSAGES 1 UIDVALIDITY 2)", &nm);
+		BOOL lit = [nm isEqualToString: @"Notes"] && [[d objectForKey: @"MESSAGES"] intValue] == 1;
+		CHECK(lit, "a literal name: %@", nm);
+		CHECK(Mail2ParseStatusLine(@"* LIST (\\HasNoChildren) \"/\" INBOX", nil, &nm) == nil, "LIST lines are not STATUS");
+		NSString *e6 = nil;
+		NSDictionary *one = [imap statusResponsesTo: @"STATUS INBOX (UIDNEXT MESSAGES UIDVALIDITY)" error: &e6];
+		NSDictionary *ref = [imap statusOf: @"INBOX" error: &e6];
+		CHECK(one != nil && [[one objectForKey: @"INBOX"] isEqualToDictionary: ref], "read off libetpan's stream: %@", one);
+		NSArray *after = [imap listMailboxes: &e6];
+		CHECK(after != nil, "and libetpan carries on after it (%lu mailboxes)", (unsigned long)[after count]);
+		NSDictionary *all = [imap statusOfAll: &e6];
+		BOOL has = [imap hasCapability: @"LIST-STATUS"];
+		CHECK(has ? [all count] > 0 : (all == nil && e6 == nil), "LIST-STATUS %@", has ? @"used" : @"not offered by GreenMail: one STATUS each");
+		Mail2Account *la = account(@"ls@localhost", @"x");
+		[la setImapPort: 3144];
+		Mail2IMAP *li = [[Mail2IMAP alloc] initWithAccount: la];
+		NSString *e7 = nil;
+		NSDictionary *ls = [li statusOfAll: &e7];
+		BOOL three = [ls count] == 3 && [[[ls objectForKey: @"Sent Mail"] objectForKey: @"UIDNEXT"] intValue] == 22 &&
+		    [[[ls objectForKey: @"Notes"] objectForKey: @"MESSAGES"] intValue] == 7 &&
+		    [[[ls objectForKey: @"INBOX"] objectForKey: @"UIDVALIDITY"] intValue] == 1;
+		CHECK(three, "a server with LIST-STATUS: every folder in one command (%@)", e7 ? e7 : [[ls allKeys] componentsJoinedByString: @", "]);
+		[li disconnect];
+		[li release];
+	}
+
+	printf("Mapped message files\n");
+	{
+		NSString *big = [Mail2SupportDirectory() stringByAppendingPathComponent: @"big.eml"];
+		NSMutableData *bd = [NSMutableData dataWithLength: 300 * 1024];
+		memcpy([bd mutableBytes], "Subject: big", 12);
+		[bd writeToFile: big atomically: YES];
+		NSData *m = Mail2ReadMessageFile(big);
+		CHECK([m isEqualToData: bd], "a large file, mapped, reads the same");
+		NSData *sm = Mail2ReadMessageFile(@"/nonexistent");
+		CHECK(sm == nil, "a missing file is nil");
+	}
+
 	printf("\n%d checks, %d failed\n", checks, failures);
 	[pool release];
 	return failures ? 1 : 0;

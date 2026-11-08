@@ -461,3 +461,19 @@ Mail2ParseSearch(NSString *text)
 	[q setObject: subject forKey: @"Subject"];
 	return q;
 }
+
+#define MAP_FROM (256 * 1024)	/* below it a read is cheaper than setting up a mapping */
+
+NSData *
+Mail2ReadMessageFile(NSString *path)
+{
+	if (path == nil)
+		return nil;
+	NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath: path error: NULL];
+	if (a != nil && [a fileSize] >= MAP_FROM) {
+		NSData *d = [NSData dataWithContentsOfMappedFile: path];
+		if (d != nil)
+			return d;
+	}
+	return [NSData dataWithContentsOfFile: path];
+}

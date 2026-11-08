@@ -829,7 +829,7 @@ scroller_for(NSTableView *t, NSRect r)
 	[path retain];
 	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
 		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-		NSData *raw = [NSData dataWithContentsOfFile: path];
+		NSData *raw = Mail2ReadMessageFile(path);
 		NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
 		/* HTML in a web view when Florence's WebKit is installed (Mail2ShowHTML, default YES), else the plain part
 		 * (Mail2PreferPlainText, default YES) or the HTML as text */
@@ -1103,7 +1103,7 @@ scroller_for(NSTableView *t, NSRect r)
 		Mail2MessageInfo *pm;
 		while ((pm = [pe nextObject]) != nil) {
 			NSString *path = [[Mail2Store sharedStore] pathForMessage: pm];
-			Mail2ParsedMessage *p = path ? [Mail2ParsedMessage parseData: [NSData dataWithContentsOfFile: path] preferPlainText: YES] : nil;
+			Mail2ParsedMessage *p = path ? [Mail2ParsedMessage parseData: Mail2ReadMessageFile(path) preferPlainText: YES] : nil;
 			[parsedAll addObject: p ? (id)p : (id)[NSNull null]];
 		}
 		[parsedAll retain];
@@ -1360,7 +1360,7 @@ scroller_for(NSTableView *t, NSRect r)
 {
 	Mail2MessageInfo *m = [self selectedMessage];
 	NSString *path = m && ![m outboxId] ? [[Mail2Store sharedStore] pathForMessage: m] : nil;
-	NSData *raw = [m outboxId] ? [[Mail2Outbox shared] messageFor: [m outboxId]] : path ? [NSData dataWithContentsOfFile: path] : nil;
+	NSData *raw = [m outboxId] ? [[Mail2Outbox shared] messageFor: [m outboxId]] : path ? Mail2ReadMessageFile(path) : nil;
 	if (raw == nil) {
 		if (m != nil)
 			NSRunAlertPanel(@"Raw Source", @"The message is not downloaded yet: show it first.", @"OK", nil, nil);

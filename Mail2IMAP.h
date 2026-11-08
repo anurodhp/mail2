@@ -31,6 +31,11 @@
 - (NSDictionary *) fetchFlagsFrom: (unsigned)uid changedSince: (unsigned long long)modseq error: (NSString **)err;
 /* STATUS: {UIDNEXT, MESSAGES, UIDVALIDITY} as NSNumbers, without selecting it */
 - (NSDictionary *) statusOf: (NSString *)mailbox error: (NSString **)err;
+/* every mailbox's STATUS in one command (LIST-STATUS, RFC 5819): {name: that dictionary}; nil without the extension
+ * (*err unset) or on failure (*err set) */
+- (NSDictionary *) statusOfAll: (NSString **)err;
+/* a command answered by untagged STATUS lines, as statusOfAll's result (for the tests) */
+- (NSDictionary *) statusResponsesTo: (NSString *)command error: (NSString **)err;
 /* UIDs (NSNumber) of the messages that arrived on or after the date */
 - (NSArray *) uidsSince: (NSDate *)date error: (NSString **)err;
 /* UIDs above uid (UID SEARCH UID uid+1:*, which on an empty range still names the last message: filtered) */
@@ -63,3 +68,6 @@
  * error. Without IDLE, sleeps until wakeFd or the timeout and returns 0. */
 - (int) idleWithWakeFd: (int)wakeFd timeout: (int)seconds error: (NSString **)err;
 @end
+
+/* one "* STATUS" line (and the line after it, for a name sent as a literal): its counts, the mailbox in *name */
+NSDictionary *Mail2ParseStatusLine(NSString *line, NSString *next, NSString **name);

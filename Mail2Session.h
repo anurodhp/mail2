@@ -27,6 +27,7 @@ extern NSString *const Mail2StatusChanged;
 	int idleWake[2];
 	volatile BOOL stopping;
 	NSTimer *timer;
+	volatile BOOL idleLive;		/* the IDLE connection is watching the Inbox */
 	NSMutableSet *fetching;	/* rowids being downloaded */
 	NSMutableSet *complete;	/* mbids with nothing older left on the server */
 }
