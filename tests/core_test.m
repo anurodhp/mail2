@@ -10,6 +10,7 @@
 #import "Mail2Util.h"
 #import "Mail2OAuth.h"
 #import "Mail2Rules.h"
+#import "Mail2RichText.h"
 #include <mbedtls/sha256.h>
 #include "Mail2TLS.h"
 #include <libetpan/mailstream.h>
@@ -771,6 +772,49 @@ main(void)
 				found = YES;
 		CHECK(found && [back count] == before, "Undo: back in the Inbox (%@)", [us lastError] ? [us lastError] : @"");
 		[us release];
+	}
+
+	printf("Rich text\n");
+	{
+		NSFont *base = [NSFont systemFontOfSize: 13];
+		NSFont *bold = [[NSFontManager sharedFontManager] convertFont: base toHaveTrait: NSBoldFontMask];
+		NSMutableAttributedString *rt = [[[NSMutableAttributedString alloc] initWithString:
+		    @"Hello <world> & bold\n• one\n• two\n> quoted\n>> deeper\nback" attributes:
+		    [NSDictionary dictionaryWithObject: base forKey: NSFontAttributeName]] autorelease];
+		[rt addAttribute: NSFontAttributeName value: bold range: [[rt string] rangeOfString: @"bold"]];
+		[rt addAttribute: NSLinkAttributeName value: @"https://example.com/?a=1&b=2" range: [[rt string] rangeOfString: @"world"]];
+		NSImage *img = [[[NSImage alloc] initWithSize: NSMakeSize(4, 4)] autorelease];
+		[img lockFocus]; [[NSColor redColor] set]; NSRectFill(NSMakeRect(0, 0, 4, 4)); [img unlockFocus];
+		NSTextAttachment *ta = [[[NSTextAttachment alloc] init] autorelease];
+		NSTextAttachmentCell *cell = [[[NSTextAttachmentCell alloc] initImageCell: img] autorelease];
+		[ta setAttachmentCell: cell];
+		[rt appendAttributedString: [NSAttributedString attributedStringWithAttachment: ta]];
+		NSMutableArray *imgs = [NSMutableArray array];
+		NSString *plainOut = nil;
+		NSString *html = Mail2HTMLFromRichText(rt, imgs, &plainOut);
+		CHECK([html rangeOfString: @"&lt;<a href=\"https://example.com/?a=1&amp;b=2\">world</a>&gt; &amp; <b>bold</b>"].location != NSNotFound,
+		    "escaping, a link and bold");
+		CHECK([html rangeOfString: @"<ul>\n<li>one</li>\n<li>two</li>\n</ul>"].location != NSNotFound, "a bulleted list");
+		CHECK([html rangeOfString: @"<blockquote"].location != NSNotFound &&
+		    [[html componentsSeparatedByString: @"<blockquote"] count] == 3 &&
+		    [[html componentsSeparatedByString: @"</blockquote>"] count] == 3, "two quote levels, closed");
+		NSString *cidRef = [imgs count] ? [@"cid:" stringByAppendingString: [[imgs objectAtIndex: 0] contentId]] : @"-";
+		CHECK([imgs count] == 1 && [[[imgs objectAtIndex: 0] mimeType] isEqualToString: @"image/png"] &&
+		    [html rangeOfString: cidRef].location != NSNotFound, "a pasted picture as an inline PNG");
+		CHECK([plainOut hasSuffix: @"back"] && Mail2RichTextHasFormatting(rt, base), "the plain alternative; formatting seen");
+		Mail2Attachment *fileAtt = [[[Mail2Attachment alloc] initWithName: @"a.txt" type: nil
+		    data: [@"file" dataUsingEncoding: NSUTF8StringEncoding]] autorelease];
+		NSData *raw = Mail2BuildMessageRich(@"test1@localhost", [NSArray arrayWithObject: @"test2@localhost"], nil, nil, @"rich",
+		    plainOut, html, imgs, nil, nil, [NSArray arrayWithObject: fileAtt], nil);
+		NSString *rawS = [[[NSString alloc] initWithData: raw encoding: NSISOLatin1StringEncoding] autorelease];
+		CHECK([rawS rangeOfString: @"multipart/mixed"].location != NSNotFound && [rawS rangeOfString: @"multipart/alternative"].location != NSNotFound &&
+		    [rawS rangeOfString: @"multipart/related"].location != NSNotFound && [rawS rangeOfString: @"Content-ID:"].location != NSNotFound,
+		    "MIME: mixed( alternative( plain, related( html, picture ) ), file )");
+		Mail2ParsedMessage *rp = [Mail2ParsedMessage parseData: raw preferPlainText: NO];
+		CHECK([[rp htmlSource] rangeOfString: @"<b>bold</b>"].location != NSNotFound && [[rp inlineParts] count] == 1 &&
+		    [[rp attachments] count] == 1, "read back: the HTML, its picture inline, the file attached");
+		Mail2ParsedMessage *rp2 = [Mail2ParsedMessage parseData: raw preferPlainText: YES];
+		CHECK([[rp2 body] hasPrefix: @"Hello <world> & bold"], "and the plain part for plain readers");
 	}
 
 	printf("\n%d checks, %d failed\n", checks, failures);

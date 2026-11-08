@@ -71,6 +71,32 @@ quote(NSString *body)
 	return [out componentsJoinedByString: @"\n"];
 }
 
+/* the body: files dropped on it are attached (not pasted in as their paths) */
+@implementation Mail2BodyView
+- (void) setFileTarget: (id)t { fileTarget = t; }
+- (NSDragOperation) draggingEntered: (id <NSDraggingInfo>)info
+{
+	if ([[[info draggingPasteboard] types] containsObject: NSFilenamesPboardType])
+		return NSDragOperationCopy;
+	return [super draggingEntered: info];
+}
+- (NSDragOperation) draggingUpdated: (id <NSDraggingInfo>)info
+{
+	if ([[[info draggingPasteboard] types] containsObject: NSFilenamesPboardType])
+		return NSDragOperationCopy;
+	return [super draggingUpdated: info];
+}
+- (BOOL) performDragOperation: (id <NSDraggingInfo>)info
+{
+	NSArray *files = [[info draggingPasteboard] propertyListForType: NSFilenamesPboardType];
+	if ([files count] && [fileTarget respondsToSelector: @selector(attachPaths:)]) {
+		[fileTarget attachPaths: files];
+		return YES;
+	}
+	return [super performDragOperation: info];
+}
+@end
+
 @implementation Mail2Compose
 
 - (id) initWithSessions: (NSArray *)all session: (Mail2Session *)s
@@ -145,9 +171,19 @@ quote(NSString *body)
 	fromPopup = [[NSPopUpButton alloc] initWithFrame: NSMakeRect(74, y + 2, MIN(360, W - 86), 24) pullsDown: NO];
 	NSEnumerator *e = [sessions objectEnumerator];
 	Mail2Session *ss;
-	while ((ss = [e nextObject]) != nil)
-		[fromPopup addItemWithTitle: [[ss account] fromAddress]];
-	[fromPopup selectItemAtIndex: [sessions indexOfObject: session]];
+	/* every account's addresses, its aliases after it; the account's own address chosen */
+	while ((ss = [e nextObject]) != nil) {
+		NSEnumerator *ae = [[[ss account] fromAddresses] objectEnumerator];
+		NSString *addr;
+		BOOL firstOfAccount = YES;
+		while ((addr = [ae nextObject]) != nil) {
+			[fromPopup addItemWithTitle: addr];
+			[[fromPopup lastItem] setRepresentedObject: [NSArray arrayWithObjects: ss, addr, nil]];
+			if (ss == session && firstOfAccount)
+				[fromPopup selectItem: [fromPopup lastItem]];
+			firstOfAccount = NO;
+		}
+	}
 	[fromPopup setTarget: self];
 	[fromPopup setAction: @selector(fromChanged:)];
 	[fromPopup setAutoresizingMask: NSViewMinYMargin];
@@ -166,7 +202,9 @@ quote(NSString *body)
 	[sv setBorderType: NSNoBorder];
 	[sv setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
 	NSSize cs = [sv contentSize];
-	bodyView = [[NSTextView alloc] initWithFrame: NSMakeRect(0, 0, cs.width, cs.height)];
+	bodyView = [[Mail2BodyView alloc] initWithFrame: NSMakeRect(0, 0, cs.width, cs.height)];
+	[(Mail2BodyView *)bodyView setFileTarget: self];
+	[bodyView registerForDraggedTypes: [NSArray arrayWithObject: NSFilenamesPboardType]];
 	[bodyView setRichText: NO];
 	[bodyView setImportsGraphics: NO];
 	[bodyView setFont: [NSFont systemFontOfSize: 13]];
@@ -396,7 +434,13 @@ signature_block(Mail2Session *s)
 	[op setTitle: @"Attach Files"];
 	if ([op runModalForDirectory: [[NSUserDefaults standardUserDefaults] stringForKey: @"Mail2AttachDirectory"] file: nil types: nil] != NSOKButton)
 		return;
-	NSEnumerator *e = [[op filenames] objectEnumerator];
+	[self attachPaths: [op filenames]];
+}
+
+/* files from the open panel or dropped on the window */
+- (void) attachPaths: (NSArray *)paths
+{
+	NSEnumerator *e = [paths objectEnumerator];
 	NSString *path;
 	unsigned long long total = 0;
 	NSEnumerator *ae = [attachments objectEnumerator];
@@ -404,6 +448,11 @@ signature_block(Mail2Session *s)
 	while ((a = [ae nextObject]) != nil)
 		total += [[a data] length];
 	while ((path = [e nextObject]) != nil) {
+		BOOL dir = NO;
+		if ([[NSFileManager defaultManager] fileExistsAtPath: path isDirectory: &dir] && dir) {
+			NSRunAlertPanel(@"Cannot Attach", @"%@ is a folder: attach the files in it.", @"OK", nil, nil, [path lastPathComponent]);
+			continue;
+		}
 		NSData *d = [NSData dataWithContentsOfFile: path];
 		if (d == nil) {
 			NSRunAlertPanel(@"Cannot Attach", @"%@ could not be read.", @"OK", nil, nil, [path lastPathComponent]);
@@ -425,8 +474,32 @@ signature_block(Mail2Session *s)
 
 - (Mail2Session *) fromSession
 {
-	NSInteger fi = [fromPopup indexOfSelectedItem];
-	return fi >= 0 && fi < (NSInteger)[sessions count] ? [sessions objectAtIndex: fi] : session;
+	NSArray *c = [[fromPopup selectedItem] representedObject];
+	return c ? [c objectAtIndex: 0] : session;
+}
+
+/* the From line chosen: the account's address or one of its aliases */
+- (NSString *) fromLine
+{
+	NSArray *c = [[fromPopup selectedItem] representedObject];
+	return c ? [c objectAtIndex: 1] : [[session account] fromAddress];
+}
+
+/* a reply goes from the address the original was sent to, when that is one of the aliases */
+- (void) chooseFromFor: (Mail2MessageInfo *)m
+{
+	NSString *all = [[NSString stringWithFormat: @"%@, %@", [m to] ? [m to] : @"", [m cc] ? [m cc] : @""] lowercaseString];
+	NSInteger i;
+	for (i = 0; i < [fromPopup numberOfItems]; i++) {
+		NSArray *c = [[fromPopup itemAtIndex: i] representedObject];
+		if ([c objectAtIndex: 0] != session)
+			continue;
+		NSString *addr = [Mail2AddressPart([c objectAtIndex: 1]) lowercaseString];
+		if ([addr length] && [all rangeOfString: addr].location != NSNotFound) {
+			[fromPopup selectItemAtIndex: i];
+			return;
+		}
+	}
 }
 
 - (BOOL) hasContent
@@ -443,11 +516,11 @@ signature_block(Mail2Session *s)
 	Mail2Session *s = [self fromSession];
 	NSString *mid = Mail2NewMessageID([[s account] email]);
 	/* addresses that cannot be read yet are kept as they were typed: the draft is not sent */
-	NSData *raw = Mail2BuildMessageEx([[s account] fromAddress], Mail2SplitAddresses([toField stringValue]),
+	NSData *raw = Mail2BuildMessageEx([self fromLine], Mail2SplitAddresses([toField stringValue]),
 	    Mail2SplitAddresses([ccField stringValue]), Mail2SplitAddresses([bccField stringValue]), [subjectField stringValue],
 	    [bodyView string], inReplyTo, references, attachments, mid);
 	if (raw == nil)
-		raw = Mail2BuildMessageEx([[s account] fromAddress], nil, nil, nil, [subjectField stringValue],
+		raw = Mail2BuildMessageEx([self fromLine], nil, nil, nil, [subjectField stringValue],
 		    [bodyView string], inReplyTo, references, attachments, mid);
 	if (raw == nil) {
 		if (!quiet)
@@ -593,6 +666,7 @@ own_address_filter(NSArray *addrs, NSString *mine, NSMutableSet *seen)
 	[c->subjectField setStringValue: strip_prefix([m subject], @"Re:")];
 	[c->window setTitle: [c->subjectField stringValue]];
 	[c setOriginal: m parsed: p];
+	[c chooseFromFor: m];
 	NSString *body = [NSString stringWithFormat: @"\n\nOn %@, %@ wrote:\n\n%@\n", Mail2LongDate([m date]), [m sender],
 	    quote([[p body] stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceAndNewlineCharacterSet]])];
 	ASSIGN(c->insertedSig, signature_block(s));
@@ -640,7 +714,7 @@ own_address_filter(NSArray *addrs, NSString *mine, NSMutableSet *seen)
 	    NSRunAlertPanel(@"No Subject", @"Send this message without a subject?", @"Send", @"Cancel", nil) != NSAlertDefaultReturn)
 		return;
 	Mail2Session *s = [self fromSession];
-	NSData *raw = Mail2BuildMessageEx([[s account] fromAddress], to, cc, nil, [subjectField stringValue], [bodyView string],
+	NSData *raw = Mail2BuildMessageEx([self fromLine], to, cc, nil, [subjectField stringValue], [bodyView string],
 	    inReplyTo, references, attachments, nil);
 	if (raw == nil) {
 		NSRunAlertPanel(@"Cannot Send", @"One of the addresses could not be read. Check To, Cc and Bcc.", @"OK", nil, nil);

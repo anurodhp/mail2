@@ -50,7 +50,7 @@ fi
 echo "building core_test"
 clang -fno-objc-arc -fblocks -O0 -g -Wall -Wno-deprecated-declarations -include tests/gnustep_compat.h \
     -I "$ROOT" -I "$STAGE/include" -I "$B/mbedtls/include" -I "$SDK/usr/include/libxml2" \
-    Mail2TLS.c Mail2Util.m Mail2Account.m Mail2Store.m Mail2IMAP.m Mail2SMTP.m Mail2Message.m Mail2Session.m Mail2OAuth.m Mail2Rules.m \
+    Mail2TLS.c Mail2Util.m Mail2Account.m Mail2Store.m Mail2IMAP.m Mail2SMTP.m Mail2Message.m Mail2Session.m Mail2OAuth.m Mail2Rules.m Mail2RichText.m \
     tests/core_test.m -o "$B/core_test" \
     "$B/libetpan.a" -L "$B/mbedtls/lib" -lmbedtls -lmbedx509 -lmbedcrypto \
     -framework Foundation -framework AppKit -lsqlite3 -lxml2 -liconv

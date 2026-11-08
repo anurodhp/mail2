@@ -19,6 +19,7 @@
 	void (^completion)(Mail2Account *);
 	NSTextField *message;
 	NSTextView *sigView;
+	NSTextField *aliasField;
 	NSButton *okButton, *cancelButton;
 	NSString *autoDomain;
 	BOOL testing;

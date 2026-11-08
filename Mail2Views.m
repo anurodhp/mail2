@@ -3,6 +3,7 @@
 #import "Mail2Util.h"
 #import "MilanText.h"
 #import "Mail2OAuth.h"
+#include <math.h>
 #include <dlfcn.h>
 #include <unistd.h>
 
@@ -422,6 +423,39 @@ initials(NSString *name)
 
 @end
 
+/* An attachment's button: a click saves it, a drag hands the file to wherever it is dropped (Milan, the desktop) as
+ * a copy written under Mail2's tmp folder. */
+@implementation Mail2AttachmentButton
+- (void) dealloc { [attachment release]; [super dealloc]; }
+- (void) setAttachment: (Mail2Attachment *)a { ASSIGN(attachment, a); }
+
+- (void) mouseDown: (NSEvent *)ev
+{
+	NSPoint start = [ev locationInWindow];
+	for (;;) {
+		NSEvent *e = [NSApp nextEventMatchingMask: NSLeftMouseDraggedMask | NSLeftMouseUpMask untilDate: [NSDate distantFuture]
+		    inMode: NSEventTrackingRunLoopMode dequeue: YES];
+		if ([e type] == NSLeftMouseUp) {	/* a click */
+			[self highlight: YES];
+			[self sendAction: [self action] to: [self target]];
+			[self highlight: NO];
+			return;
+		}
+		NSPoint p = [e locationInWindow];
+		if (fabs(p.x - start.x) + fabs(p.y - start.y) > 5) {
+			NSString *dir = [[Mail2SupportDirectory() stringByAppendingPathComponent: @"tmp"]
+			    stringByAppendingPathComponent: [[NSProcessInfo processInfo] globallyUniqueString]];
+			[[NSFileManager defaultManager] createDirectoryAtPath: dir withIntermediateDirectories: YES attributes: nil error: NULL];
+			NSString *path = [dir stringByAppendingPathComponent: [[attachment filename] length] ? [attachment filename] : @"Attachment"];
+			if (![[attachment data] writeToFile: path atomically: YES])
+				return;
+			[self dragFile: path fromRect: [self bounds] slideBack: YES event: ev];
+			return;
+		}
+	}
+}
+@end
+
 @implementation Mail2MessageView
 
 - (BOOL) isFlipped { return YES; }
@@ -529,7 +563,8 @@ initials(NSString *name)
 	for (i = 0; i < [attachments count]; i++) {
 		Mail2Attachment *a = [attachments objectAtIndex: i];
 		NSString *title = [NSString stringWithFormat: @"%@  (%@)", [a filename], Mail2ByteSize([[a data] length])];
-		NSButton *b = [[[NSButton alloc] initWithFrame: NSMakeRect(x, 4, 10, 26)] autorelease];
+		Mail2AttachmentButton *b = [[[Mail2AttachmentButton alloc] initWithFrame: NSMakeRect(x, 4, 10, 26)] autorelease];
+		[b setAttachment: a];
 		[b setTitle: title];
 		[b setImage: Mail2Icon(@"sb-attachment")];
 		[b setImagePosition: NSImageLeft];
@@ -543,7 +578,7 @@ initials(NSString *name)
 		[b setTag: i];
 		[b setTarget: self];
 		[b setAction: @selector(saveAttachment:)];
-		[b setToolTip: @"Save…"];
+		[b setToolTip: @"Click to save; drag to put it somewhere"];
 		[attachBar addSubview: b];
 		x += bf.size.width + 6;
 	}
@@ -814,6 +849,31 @@ Mail2StyleBody(NSMutableAttributedString *as)
 	    [NSColor blackColor], NSForegroundColorAttributeName, nil];
 	NSMutableAttributedString *as = [[MilanDisplayString(body ? body : @"", attrs) mutableCopy] autorelease];
 	Mail2StyleBody(as);
+	/* attached pictures under the text, as Apple Mail shows them (at most the pane's width) */
+	NSEnumerator *ie = [att objectEnumerator];
+	Mail2Attachment *ia;
+	CGFloat maxW = MAX(120, NSWidth([self bounds]) - 60);
+	int shownImages = 0;
+	while ((ia = [ie nextObject]) != nil && shownImages < 8) {
+		NSString *t = [[ia mimeType] lowercaseString];
+		if (![t hasPrefix: @"image/"] || [[ia data] length] > 8 * 1024 * 1024)
+			continue;
+		NSImage *img = [[[NSImage alloc] initWithData: [ia data]] autorelease];
+		if (img == nil || [img size].width < 1)
+			continue;
+		NSSize sz = [img size];
+		if (sz.width > maxW) {
+			sz = NSMakeSize(maxW, floor(sz.height * maxW / sz.width));
+			[img setScalingAllowed: YES];
+			[img setSize: sz];
+		}
+		NSTextAttachmentCell *cell = [[[NSTextAttachmentCell alloc] initImageCell: img] autorelease];
+		NSTextAttachment *ta = [[[NSTextAttachment alloc] init] autorelease];
+		[ta setAttachmentCell: cell];
+		[as appendAttributedString: [[[NSAttributedString alloc] initWithString: @"\n\n" attributes: attrs] autorelease]];
+		[as appendAttributedString: [NSAttributedString attributedStringWithAttachment: ta]];
+		shownImages++;
+	}
 	[[text textStorage] setAttributedString: as];
 	[text setDelegate: (id)self];
 	[text scrollRangeToVisible: NSMakeRange(0, 0)];

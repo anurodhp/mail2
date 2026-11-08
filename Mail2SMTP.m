@@ -93,6 +93,29 @@ authenticate(mailsmtp *s, Mail2Account *a, NSString **err)
 	return NO;
 }
 
+/* the address of the message's From header: the envelope sender (an alias sends as itself) */
+static NSString *
+header_from(NSData *raw)
+{
+	const char *p = [raw bytes];
+	size_t n = [raw length];
+	const char *end = memmem(p, n, "\r\n\r\n", 4);
+	NSString *head = [[[NSString alloc] initWithBytes: p length: end ? (NSUInteger)(end - p) : MIN(n, (size_t)8192)
+	    encoding: NSISOLatin1StringEncoding] autorelease];
+	NSEnumerator *e = [[head componentsSeparatedByString: @"\r\n"] objectEnumerator];
+	NSString *l, *from = nil;
+	while ((l = [e nextObject]) != nil) {
+		if (from != nil && ([l hasPrefix: @" "] || [l hasPrefix: @"\t"]))
+			from = [from stringByAppendingString: l];
+		else if (from != nil)
+			break;
+		else if ([[l lowercaseString] hasPrefix: @"from:"])
+			from = [l substringFromIndex: 5];
+	}
+	NSString *addr = from ? Mail2AddressPart([from stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]]) : nil;
+	return [addr rangeOfString: @"@"].location != NSNotFound ? addr : nil;
+}
+
 BOOL
 Mail2SendMessage(Mail2Account *a, NSData *raw, NSArray *recipients, NSString **err)
 {
@@ -167,7 +190,8 @@ Mail2SendMessage(Mail2Account *a, NSData *raw, NSArray *recipients, NSString **e
 	NSString *addr;
 	while ((addr = [en nextObject]) != nil)
 		esmtp_address_list_add(rcpts, (char *)[addr UTF8String], 0, NULL);
-	r = mailesmtp_send(s, [[a email] UTF8String], 0, NULL, rcpts, [raw bytes], [raw length]);
+	NSString *envFrom = header_from(raw);
+	r = mailesmtp_send(s, [(envFrom ? envFrom : [a email]) UTF8String], 0, NULL, rcpts, [raw bytes], [raw length]);
 	esmtp_address_list_free(rcpts);
 	if (r != MAILSMTP_NO_ERROR) {
 		*err = smtp_error(s, r, @"Sending");

@@ -15,6 +15,7 @@ typedef enum { Mail2AuthPassword = 0, Mail2AuthGoogle = 1, Mail2AuthMicrosoft = 
 	Mail2Auth auth;
 	NSString *refreshToken;		/* OAuth: kept in Accounts.plist like the password */
 	NSString *signature;
+	NSArray *aliases;		/* other addresses mail can be sent from ("addr" or "Name <addr>") */
 }
 /* the OAuth provider for an address (gmail.com: Google; outlook.com, hotmail.com, live.com, msn.com: Microsoft), else
  * Mail2AuthPassword */
@@ -57,6 +58,10 @@ typedef enum { Mail2AuthPassword = 0, Mail2AuthGoogle = 1, Mail2AuthMicrosoft = 
 - (BOOL) usesOAuth;
 - (NSString *) signature;	/* added under "-- " to new messages, replies and forwards; nil or empty for none */
 - (void) setSignature: (NSString *)s;
+- (NSArray *) aliases;
+- (void) setAliases: (NSArray *)a;
+/* "Name <email>" and each alias with the account's name (unless it has one): the From menu's choices */
+- (NSArray *) fromAddresses;
 @end
 
 /* posted (main thread) when a background refresh changed an account's saved settings (a new refresh token) */

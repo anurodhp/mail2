@@ -6,6 +6,13 @@
 #import "Mail2Session.h"
 #import "Mail2Message.h"
 
+@interface Mail2BodyView : NSTextView
+{
+	id fileTarget;	/* not retained: the compose window's controller */
+}
+- (void) setFileTarget: (id)t;
+@end
+
 @interface Mail2Compose : NSObject <NSWindowDelegate>
 {
 	NSWindow *window;
@@ -38,5 +45,6 @@
 + (Mail2Compose *) editDraft: (Mail2MessageInfo *)m parsed: (Mail2ParsedMessage *)p session: (Mail2Session *)s sessions: (NSArray *)all;
 - (NSWindow *) window;
 - (void) attachFile: (id)sender;
+- (void) attachPaths: (NSArray *)paths;
 - (void) saveDraft: (id)sender;		/* also every minute while there are unsaved changes */
 @end

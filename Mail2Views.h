@@ -33,6 +33,13 @@
 - (void) setMessage: (Mail2MessageInfo *)m selected: (BOOL)s child: (BOOL)c count: (int)n;
 @end
 
+@interface Mail2AttachmentButton : NSButton
+{
+	Mail2Attachment *attachment;
+}
+- (void) setAttachment: (Mail2Attachment *)a;
+@end
+
 /* the right pane: the header block, the attachment strip and the body */
 @interface Mail2MessageView : NSView
 {

@@ -21,7 +21,9 @@
 	}
 	return self;
 }
-- (void) dealloc { [filename release]; [mimeType release]; [data release]; [super dealloc]; }
+- (void) dealloc { [filename release]; [mimeType release]; [data release]; [contentId release]; [super dealloc]; }
+- (NSString *) contentId { return contentId; }
+- (void) setContentId: (NSString *)c { ASSIGN(contentId, c); }
 - (NSString *) filename { return filename; }
 - (NSString *) mimeType { return mimeType; }
 - (NSData *) data { return data; }
@@ -310,7 +312,7 @@ choose_alternative(struct mailmime *m, BOOL plain)
 			return;
 		}
 		/* inline images of an HTML body (Content-ID, no name): not files, but kept for the web view's cid: URLs */
-		if (!attached && fname == NULL && sf.fld_id != NULL && [t hasPrefix: @"image/"]) {
+		if (!attached && sf.fld_id != NULL && [t hasPrefix: @"image/"]) {
 			if (inlineParts == nil)
 				inlineParts = [[NSMutableDictionary alloc] init];
 			[inlineParts setObject: [[[Mail2Attachment alloc] initWithName: @"" type: t data: decode_part(m)] autorelease]
@@ -579,9 +581,49 @@ attachment_part(Mail2Attachment *a)
 	return part;
 }
 
+/* an inline picture of the HTML: base64, Content-ID, disposition inline */
+static struct mailmime *
+inline_part(Mail2Attachment *a)
+{
+	NSString *type = [[a mimeType] length] ? [a mimeType] : Mail2MimeTypeForFilename([a filename]);
+	struct mailmime_content *ct = mailmime_content_new_with_str([type UTF8String]);
+	if (ct == NULL)
+		ct = mailmime_content_new_with_str("application/octet-stream");
+	NSString *name = Mail2EncodeHeader([a filename] ? [a filename] : @"image");
+	clist_append(ct->ct_parameters, mailmime_param_new_with_data(strdup("name"), dup_utf8(name)));
+	struct mailmime_disposition *dsp = mailmime_disposition_new_with_data(MAILMIME_DISPOSITION_TYPE_INLINE, dup_utf8(name),
+	    NULL, NULL, NULL, (size_t)-1);
+	struct mailmime_fields *mf = mailmime_fields_new_with_data(mailmime_mechanism_new(MAILMIME_MECHANISM_BASE64, NULL),
+	    dup_utf8([a contentId]), NULL, dsp, NULL);
+	struct mailmime *part = mailmime_new_empty(ct, mf);
+	mailmime_set_body_text(part, (char *)[[a data] bytes], [[a data] length]);
+	return part;
+}
+
+static struct mailmime *
+text_part(NSString *mime, NSString *text)
+{
+	NSString *crlf = [[(text ? text : @"") stringByReplacingOccurrencesOfString: @"\r\n" withString: @"\n"]
+	    stringByReplacingOccurrencesOfString: @"\n" withString: @"\r\n"];
+	NSData *bytes = [crlf dataUsingEncoding: NSUTF8StringEncoding];
+	struct mailmime_content *ct = mailmime_content_new_with_str([mime UTF8String]);
+	clist_append(ct->ct_parameters, mailmime_param_new_with_data(strdup("charset"), strdup("utf-8")));
+	struct mailmime *part = mailmime_new_empty(ct, mailmime_fields_new_encoding(MAILMIME_MECHANISM_QUOTED_PRINTABLE));
+	/* the bytes must outlive the write: kept by the autorelease pool of the caller */
+	mailmime_set_body_text(part, (char *)[bytes bytes], [bytes length]);
+	return part;
+}
+
 NSData *
 Mail2BuildMessageEx(NSString *from, NSArray *to, NSArray *cc, NSArray *bccHeader, NSString *subject, NSString *body,
     NSString *inReplyTo, NSArray *references, NSArray *attachments, NSString *messageId)
+{
+	return Mail2BuildMessageRich(from, to, cc, bccHeader, subject, body, nil, nil, inReplyTo, references, attachments, messageId);
+}
+
+NSData *
+Mail2BuildMessageRich(NSString *from, NSArray *to, NSArray *cc, NSArray *bccHeader, NSString *subject, NSString *body,
+    NSString *html, NSArray *inlineImages, NSString *inReplyTo, NSArray *references, NSArray *attachments, NSString *messageId)
 {
 	BOOL bad = NO;
 	struct mailimf_mailbox *fromMb = make_mailbox(from);
@@ -614,20 +656,29 @@ Mail2BuildMessageEx(NSString *from, NSArray *to, NSArray *cc, NSArray *bccHeader
 	    dup_utf8(Mail2EncodeHeader([subject length] ? subject : @"")));
 	mailimf_fields_add(fields, mailimf_field_new_custom(strdup("User-Agent"), strdup("Mail2/0.2 (GNUstep)")));
 
-	/* the body: lines end in CRLF on the wire */
-	NSString *crlf = [[(body ? body : @"") stringByReplacingOccurrencesOfString: @"\r\n" withString: @"\n"]
-	    stringByReplacingOccurrencesOfString: @"\n" withString: @"\r\n"];
-	NSData *text = [crlf dataUsingEncoding: NSUTF8StringEncoding];
-	struct mailmime_content *ct = mailmime_content_new_with_str("text/plain");
-	clist_append(ct->ct_parameters, mailmime_param_new_with_data(strdup("charset"), strdup("utf-8")));
-	struct mailmime *part = mailmime_new_empty(ct, mailmime_fields_new_encoding(MAILMIME_MECHANISM_QUOTED_PRINTABLE));
-	mailmime_set_body_text(part, (char *)[text bytes], [text length]);	/* not copied: text outlives the write */
+	/* the body: the plain text, or plain text and HTML (with its pictures); files around it */
+	struct mailmime *part = text_part(@"text/plain", body);
+	if ([html length]) {
+		struct mailmime *alt = mailmime_multiple_new("multipart/alternative");
+		struct mailmime *hp = text_part(@"text/html", html);
+		mailmime_smart_add_part(alt, part);
+		if ([inlineImages count]) {
+			struct mailmime *rel = mailmime_multiple_new("multipart/related");
+			NSEnumerator *ie = [inlineImages objectEnumerator];
+			Mail2Attachment *ia;
+			mailmime_smart_add_part(rel, hp);
+			while ((ia = [ie nextObject]) != nil)
+				mailmime_smart_add_part(rel, inline_part(ia));
+			mailmime_smart_add_part(alt, rel);
+		} else
+			mailmime_smart_add_part(alt, hp);
+		part = alt;
+	}
 	struct mailmime *msg = mailmime_new_message_data(NULL);
 	mailmime_set_imf_fields(msg, fields);
 	if ([attachments count] == 0)
 		mailmime_smart_add_part(msg, part);
 	else {
-		/* multipart/mixed: the text, then each file */
 		struct mailmime *mixed = mailmime_multiple_new("multipart/mixed");
 		NSEnumerator *e = [attachments objectEnumerator];
 		Mail2Attachment *a;

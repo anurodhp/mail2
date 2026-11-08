@@ -4,10 +4,12 @@
 
 @interface Mail2Attachment : NSObject
 {
-	NSString *filename, *mimeType;
+	NSString *filename, *mimeType, *contentId;
 	NSData *data;
 }
 - (id) initWithName: (NSString *)n type: (NSString *)t data: (NSData *)d;	/* t nil: from the name */
+- (NSString *) contentId;		/* an inline picture's Content-ID (no <>), for cid: in HTML */
+- (void) setContentId: (NSString *)c;
 - (NSString *) filename;
 - (NSString *) mimeType;
 - (NSData *) data;	/* decoded */
@@ -53,6 +55,10 @@ NSData *Mail2BuildMessage(NSString *from, NSArray *to, NSArray *cc, NSString *su
  * Bcc; never for a message sent) and a given Message-ID ("<id>"; nil makes one). */
 NSData *Mail2BuildMessageEx(NSString *from, NSArray *to, NSArray *cc, NSArray *bccHeader, NSString *subject, NSString *body,
     NSString *inReplyTo, NSArray *references, NSArray *attachments, NSString *messageId);
+/* With an HTML body as well: multipart/alternative of the plain text and the HTML, the HTML with its pictures
+ * (Mail2Attachment with -contentId, shown by cid:) in multipart/related; files in multipart/mixed around it. */
+NSData *Mail2BuildMessageRich(NSString *from, NSArray *to, NSArray *cc, NSArray *bccHeader, NSString *subject, NSString *body,
+    NSString *html, NSArray *inlineImages, NSString *inReplyTo, NSArray *references, NSArray *attachments, NSString *messageId);
 NSString *Mail2MimeTypeForFilename(NSString *name);
 NSString *Mail2NewMessageID(NSString *fromAddress);	/* "<unique.mail2@the sender's domain>" */
 

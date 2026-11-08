@@ -92,13 +92,13 @@ centered(CGFloat w, CGFloat h)
 	cancelPipe[0] = cancelPipe[1] = -1;
 	/* a panel, not a window: a window becoming key makes the Eau theme push the application's menu to Naples, and that
 	 * distributed-objects call crashed GNUstep base here twice (QEMU, 2026-11-08); a panel makes no push */
-	panel = [[Mail2KeyOrderPanel alloc] initWithContentRect: centered(480, 590)
+	panel = [[Mail2KeyOrderPanel alloc] initWithContentRect: centered(480, 626)
 	    styleMask: NSTitledWindowMask | NSClosableWindowMask backing: NSBackingStoreBuffered defer: NO];
 	[panel setHidesOnDeactivate: NO];
 	[panel setDelegate: (id)self];
 	[panel setTitle: @"Mail Account"];
 	NSView *v = [panel contentView];
-	CGFloat y = 550, lx = 16, lw = 110, fx = 132, fw = 330;
+	CGFloat y = 586, lx = 16, lw = 110, fx = 132, fw = 330;
 
 	make_label(v, @"Sign in to your mail account. iCloud and Yahoo need an app password.",
 	    NSMakeRect(lx, y, 448, 18), NO);
@@ -149,7 +149,11 @@ centered(CGFloat w, CGFloat h)
 	smtpUser = [make_field(v, NSMakeRect(fx, y - 2, 200, 22)) retain];
 	smtpSec = [make_security(v, NSMakeRect(fx + 210, y - 4, 120, 26)) retain];
 
-	y -= 40;
+	y -= 36;
+	make_label(v, @"Other Addresses:", NSMakeRect(lx, y, lw, 18), NO);
+	aliasField = [make_field(v, NSMakeRect(fx, y - 2, fw, 22)) retain];
+	[[aliasField cell] setPlaceholderString: @"me@example.org, Me <work@example.com>"];
+	y -= 34;
 	make_label(v, @"Signature:", NSMakeRect(lx, y, lw, 18), NO);
 	NSScrollView *ss = [[[NSScrollView alloc] initWithFrame: NSMakeRect(fx, y - 50, fw, 70)] autorelease];
 	[ss setHasVerticalScroller: YES];
@@ -198,7 +202,8 @@ centered(CGFloat w, CGFloat h)
 	[imapUser setNextKeyView: smtpHost];
 	[smtpHost setNextKeyView: smtpPort];
 	[smtpPort setNextKeyView: smtpUser];
-	[smtpUser setNextKeyView: sigView];
+	[smtpUser setNextKeyView: aliasField];
+	[aliasField setNextKeyView: sigView];
 	[sigView setNextKeyView: nameField];
 	return self;
 }
@@ -209,7 +214,7 @@ centered(CGFloat w, CGFloat h)
 	[imapHost release]; [imapPort release]; [imapUser release]; [imapSec release];
 	[smtpHost release]; [smtpPort release]; [smtpUser release]; [smtpSec release];
 	[message release]; [okButton release]; [cancelButton release]; [autoDomain release]; [result release];
-	[authPopup release]; [existing release]; [completion release]; [sigView release];
+	[authPopup release]; [existing release]; [completion release]; [sigView release]; [aliasField release];
 	if (cancelPipe[0] >= 0) { close(cancelPipe[0]); close(cancelPipe[1]); }
 	[super dealloc];
 }
@@ -217,7 +222,7 @@ centered(CGFloat w, CGFloat h)
 - (NSArray *) fieldOrder
 {
 	return [NSArray arrayWithObjects: nameField, emailField, passField, imapHost, imapPort, imapUser, smtpHost, smtpPort,
-	    smtpUser, sigView, nil];
+	    smtpUser, aliasField, sigView, nil];
 }
 
 - (void) fillFrom: (Mail2Account *)a
@@ -293,6 +298,7 @@ centered(CGFloat w, CGFloat h)
 	[a setSmtpSecurity: (Mail2Security)[smtpSec indexOfSelectedItem]];
 	[a setAuth: (Mail2Auth)[authPopup indexOfSelectedItem]];
 	[a setSignature: [[sigView string] stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceAndNewlineCharacterSet]]];
+	[a setAliases: Mail2SplitAddresses([aliasField stringValue])];
 	/* editing an OAuth account keeps its sign-in */
 	if (existing != nil && [existing auth] == [a auth] && [a usesOAuth])
 		[a setRefreshToken: [existing refreshToken]];
@@ -427,6 +433,7 @@ static Mail2AccountPanel *open_panel;	/* one at a time; it keeps itself alive wh
 		[p->passField setStringValue: [existing password] ? [existing password] : @""];
 		[p fillFrom: existing];
 		[p->sigView setString: [existing signature] ? [existing signature] : @""];
+		[p->aliasField setStringValue: [[existing aliases] componentsJoinedByString: @", "]];
 		[p->emailField setEditable: NO];	/* the address names the account's files */
 		[p updateAuth];
 	} else {

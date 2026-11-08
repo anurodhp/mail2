@@ -106,6 +106,7 @@ NSString *const Mail2AccountChanged = @"Mail2AccountChanged";
 		[a setAuth: [[d objectForKey: @"Auth"] intValue]];
 		[a setRefreshToken: [[d objectForKey: @"RefreshToken"] length] ? [d objectForKey: @"RefreshToken"] : nil];
 		[a setSignature: [d objectForKey: @"Signature"]];
+		[a setAliases: [d objectForKey: @"Aliases"]];
 		[r addObject: a];
 	}
 	return r;
@@ -133,6 +134,7 @@ NSString *const Mail2AccountChanged = @"Mail2AccountChanged";
 		    [NSNumber numberWithInt: [a auth]], @"Auth",
 		    [a refreshToken] ? [a refreshToken] : @"", @"RefreshToken",
 		    [a signature] ? [a signature] : @"", @"Signature",
+		    [a aliases] ? [a aliases] : [NSArray array], @"Aliases",
 		    nil]];
 	}
 	NSString *p = accounts_path();
@@ -150,7 +152,7 @@ NSString *const Mail2AccountChanged = @"Mail2AccountChanged";
 {
 	[identifier release]; [fullName release]; [email release]; [password release];
 	[imapHost release]; [imapUser release]; [smtpHost release]; [smtpUser release]; [refreshToken release];
-	[signature release];
+	[signature release]; [aliases release];
 	[super dealloc];
 }
 
@@ -203,4 +205,24 @@ NSString *const Mail2AccountChanged = @"Mail2AccountChanged";
 - (BOOL) usesOAuth { return auth != Mail2AuthPassword; }
 - (NSString *) signature { return signature; }
 - (void) setSignature: (NSString *)s { ASSIGN(signature, [s length] ? s : nil); }
+- (NSArray *) aliases { return aliases; }
+- (void) setAliases: (NSArray *)a { ASSIGN(aliases, [a isKindOfClass: [NSArray class]] && [a count] ? a : nil); }
+
+- (NSArray *) fromAddresses
+{
+	NSMutableArray *r = [NSMutableArray arrayWithObject: [self fromAddress]];
+	NSEnumerator *e = [aliases objectEnumerator];
+	NSString *al;
+	while ((al = [e nextObject]) != nil) {
+		if ([al rangeOfString: @"<"].location != NSNotFound || [fullName length] == 0)
+			[r addObject: al];
+		else {
+			NSString *saved = email;
+			email = al;	/* fromAddress with this address: the name quoted the same way */
+			[r addObject: [self fromAddress]];
+			email = saved;
+		}
+	}
+	return r;
+}
 @end
