@@ -31,3 +31,8 @@ Third-party material:
 Libraries Mail2 links against (dynamically; none is included in this
 repository): libetpan 1.9.4 (BSD-3-Clause), SQLite 3.44 (public domain),
 Mbed TLS 3.6 (Apache-2.0), libxml2 (MIT).
+
+Mail2.app also contains the en_US spelling dictionary in dict/ (from LibreOffice's dictionaries,
+derived from SCOWL; Copyright 2000-2018 Kevin Atkinson and others), under the permission notices in
+dict/README_en_US.txt, and links Hunspell (https://github.com/hunspell/hunspell), used under the
+Mozilla Public License 1.1.

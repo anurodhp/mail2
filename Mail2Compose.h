@@ -9,8 +9,10 @@
 @interface Mail2BodyView : NSTextView
 {
 	id fileTarget;	/* not retained: the compose window's controller */
+	NSArray *misspelled;	/* NSValue ranges, underlined in red (the layout manager's, never in the text sent) */
 }
 - (void) setFileTarget: (id)t;
+- (void) checkSpellingSoon;
 @end
 
 @interface Mail2Compose : NSObject <NSWindowDelegate>

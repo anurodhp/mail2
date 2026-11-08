@@ -15,8 +15,8 @@ IOKIT_DIR="${IOKIT_DIR:-$HERE/../iokit}"
 STAGING="$IOKIT_DIR/tools/userland_staging"
 [ -x "$STAGING/build_mail2.sh" ] || { echo "error: $STAGING/build_mail2.sh not found; set IOKIT_DIR" >&2; exit 1; }
 SYS="$STAGING/libc_build/system"
-for l in libetpan libsqlite3; do
-    [ -f "$SYS/$l.dylib" ] || (cd "$STAGING" && ./build_${l#lib}.sh)
+for pair in libetpan:libetpan libsqlite3:sqlite libhunspell:hunspell; do
+    [ -f "$SYS/${pair%%:*}.dylib" ] || (cd "$STAGING" && "./build_${pair#*:}.sh")
 done
 
 MAIL2_SRC="$HERE" "$STAGING/build_mail2.sh"
@@ -26,7 +26,7 @@ HOST="${DEPLOY_HOST:-root@10.0.0.142}"
 GSROOT="$(cd "$STAGING/libc_build/gnustep/root/usr/GNUstep/System" && pwd -P)"
 # The new dylibs, each at its install name. Written beside the old file and renamed over it: overwriting a Mach-O
 # in place has left its old code-signature state on this system (Venice's build.sh).
-for l in libetpan libsqlite3 libmbedcrypto libmbedx509 libmbedtls; do
+for l in libetpan libsqlite3 libhunspell libmbedcrypto libmbedx509 libmbedtls; do
     iname="$(otool -D "$SYS/$l.dylib" | tail -1)"
     ssh "$HOST" "cat > '$iname.new' && mv '$iname.new' '$iname'" < "$SYS/$l.dylib"
 done

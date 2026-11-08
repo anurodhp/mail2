@@ -46,13 +46,26 @@ if [ ! -f "$B/libetpan.a" ]; then
     ar rcs "$B/libetpan.a" "$B/etpan-obj"/*.o
 fi
 
+# Hunspell 1.7.6 for the host (static), with the generated headers iokit's build_hunspell.sh wrote
+HUN_SRC="$IOKIT_DIR/third_party/hunspell/src/hunspell"
+HUN_GEN="$STAGE/gen/hunspell/gen"
+[ -f "$HUN_GEN/hunvisapi.h" ] || { echo "error: run iokit's build_hunspell.sh first" >&2; exit 1; }
+if [ ! -f "$B/libhunspell.a" ]; then
+    echo "building hunspell for the host"
+    rm -rf "$B/hun-obj"; mkdir -p "$B/hun-obj"
+    for f in affentry affixmgr csutil filemgr hashmgr hunspell hunspelltrace hunzip phonet replist suggestmgr; do
+        clang++ -c -O1 -w -std=c++14 -DBUILDING_LIBHUNSPELL -I "$HUN_GEN" -I "$HUN_SRC" "$HUN_SRC/$f.cxx" -o "$B/hun-obj/$f.o"
+    done
+    ar rcs "$B/libhunspell.a" "$B/hun-obj"/*.o
+fi
+
 # the test program: Mail2's core sources + core_test.m
 echo "building core_test"
 clang -fno-objc-arc -fblocks -O0 -g -Wall -Wno-deprecated-declarations -include tests/gnustep_compat.h \
     -I "$ROOT" -I "$STAGE/include" -I "$B/mbedtls/include" -I "$SDK/usr/include/libxml2" \
-    Mail2TLS.c Mail2Util.m Mail2Account.m Mail2Store.m Mail2IMAP.m Mail2SMTP.m Mail2Message.m Mail2Session.m Mail2OAuth.m Mail2Rules.m Mail2RichText.m Mail2Outbox.m \
+    Mail2TLS.c Mail2Util.m Mail2Account.m Mail2Store.m Mail2IMAP.m Mail2SMTP.m Mail2Message.m Mail2Session.m Mail2OAuth.m Mail2Rules.m Mail2RichText.m Mail2Outbox.m Mail2Spell.m \
     tests/core_test.m -o "$B/core_test" \
-    "$B/libetpan.a" -L "$B/mbedtls/lib" -lmbedtls -lmbedx509 -lmbedcrypto \
+    "$B/libetpan.a" "$B/libhunspell.a" -lc++ -L "$B/mbedtls/lib" -lmbedtls -lmbedx509 -lmbedcrypto \
     -framework Foundation -framework AppKit -lsqlite3 -lxml2 -liconv
 
 # GreenMail: IMAP 3143, SMTP 3025, IMAPS 3993 (self-signed), two users

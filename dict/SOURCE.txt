@@ -1,0 +1,9 @@
+en_US.aff, en_US.dic, README_en_US.txt: from LibreOffice's dictionaries repository
+(github.com/LibreOffice/dictionaries), tag libreoffice-24.8.7.2, directory en/, unmodified.
+SHA-256:
+  e746c882dd6f303c2c46e7452804b9201115a6942cfeb15f18f8edf774d2e24e  en_US.aff
+  f0b1a234bd178bdd01875b2a392a9647f888b8fe879f79c52aae62c2759b3647  en_US.dic
+  168b4c01cb841f766a72f310b065c04d09cff46376c37a81d799593ce751c371  README_en_US.txt
+Licence: SCOWL's (Kevin Atkinson) with the notices in README_en_US.txt -- permission to use,
+copy, modify, distribute and sell, with the copyright notices kept. Used by Mail2's spell
+checking through Hunspell.

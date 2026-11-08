@@ -12,6 +12,7 @@
 #import "Mail2Rules.h"
 #import "Mail2RichText.h"
 #import "Mail2Outbox.h"
+#import "Mail2Spell.h"
 #include <mbedtls/sha256.h>
 #include "Mail2TLS.h"
 #include <libetpan/mailstream.h>
@@ -858,6 +859,32 @@ main(void)
 		[ob takeBack: bad];
 		[os1 release];
 		[osb release];
+	}
+
+	printf("Spelling (Hunspell, en_US)\n");
+	{
+		NSString *dir = [[[NSString stringWithUTF8String: __FILE__] stringByDeletingLastPathComponent]
+		    stringByAppendingPathComponent: @"../dict"];
+		Mail2Spell *sp = [[[Mail2Spell alloc] initWithAffix: [dir stringByAppendingPathComponent: @"en_US.aff"]
+		    dictionary: [dir stringByAppendingPathComponent: @"en_US.dic"]] autorelease];
+		CHECK(sp != nil && [sp isCorrect: @"receive"] && ![sp isCorrect: @"recieve"] && [sp isCorrect: @"don't"] &&
+		    [sp isCorrect: @"don’t"], "words, and both apostrophes");
+		NSArray *sugs = [sp suggestionsFor: @"recieve"];
+		CHECK([sugs containsObject: @"receive"], "suggestions: %@", sugs);
+		NSString *text = @"Teh plan is ready, see https://exmaple.com or mail ann@exmaple.com.\n> Quoted txet stays.\nNASA and 3rd and Mail2 are fine; wrold";
+		NSArray *bad = [sp misspellingsIn: text];
+		NSMutableArray *words = [NSMutableArray array];
+		NSEnumerator *e = [bad objectEnumerator];
+		NSValue *v;
+		while ((v = [e nextObject]) != nil)
+			[words addObject: [text substringWithRange: [v rangeValue]]];
+		NSArray *expectWords = [NSArray arrayWithObjects: @"Teh", @"wrold", nil];
+		CHECK([words isEqualToArray: expectWords],
+		    "misspellings, not links, addresses, quotes, acronyms or words with digits: %@", words);
+		[sp learn: @"Wrold"];
+		NSString *wordsFile = [NSString stringWithContentsOfFile: [Mail2SupportDirectory() stringByAppendingPathComponent: @"Words.txt"]
+		    encoding: NSUTF8StringEncoding error: NULL];
+		CHECK([sp isCorrect: @"Wrold"] && [wordsFile rangeOfString: @"Wrold"].location != NSNotFound, "Learn Spelling keeps the word");
 	}
 
 	printf("\n%d checks, %d failed\n", checks, failures);

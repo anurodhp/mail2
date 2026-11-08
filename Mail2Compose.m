@@ -4,6 +4,7 @@
 #import "Mail2Util.h"
 #import "Mail2RichText.h"
 #import "Mail2Outbox.h"
+#import "Mail2Spell.h"
 #include <ctype.h>
 #include <math.h>
 
@@ -78,6 +79,115 @@ quote(NSString *body)
 /* the body: files dropped on it are attached (not pasted in as their paths) */
 @implementation Mail2BodyView
 - (void) setFileTarget: (id)t { fileTarget = t; }
+
+- (void) dealloc
+{
+	[NSObject cancelPreviousPerformRequestsWithTarget: self];
+	[misspelled release];
+	[super dealloc];
+}
+
+/* ---- spelling (Mail2Spell, Hunspell) ---- */
+
+- (void) checkSpellingSoon
+{
+	[NSObject cancelPreviousPerformRequestsWithTarget: self selector: @selector(checkSpelling) object: nil];
+	[self performSelector: @selector(checkSpelling) withObject: nil afterDelay: 0.6];
+}
+
+- (void) checkSpelling
+{
+	Mail2Spell *sp = [Mail2Spell shared];
+	NSLayoutManager *lm = [self layoutManager];
+	NSUInteger n = [[self textStorage] length];
+	BOOL temp = [lm respondsToSelector: @selector(addTemporaryAttribute:value:forCharacterRange:)];
+	if (sp == nil || !temp)
+		return;
+	[lm removeTemporaryAttribute: NSUnderlineStyleAttributeName forCharacterRange: NSMakeRange(0, n)];
+	[lm removeTemporaryAttribute: NSUnderlineColorAttributeName forCharacterRange: NSMakeRange(0, n)];
+	NSArray *bad = [sp misspellingsIn: [self string]];
+	NSRange sel = [self selectedRange];
+	NSEnumerator *e = [bad objectEnumerator];
+	NSValue *v;
+	NSMutableArray *kept = [NSMutableArray array];
+	while ((v = [e nextObject]) != nil) {
+		NSRange r = [v rangeValue];
+		if (sel.length == 0 && sel.location == NSMaxRange(r))
+			continue;	/* the word being typed */
+		[lm addTemporaryAttribute: NSUnderlineStyleAttributeName value: [NSNumber numberWithInt: NSUnderlineStyleSingle] forCharacterRange: r];
+		[lm addTemporaryAttribute: NSUnderlineColorAttributeName value: [NSColor redColor] forCharacterRange: r];
+		[kept addObject: v];
+	}
+	ASSIGN(misspelled, kept);
+	[self setNeedsDisplay: YES];
+}
+
+- (NSRange) misspellingAt: (NSUInteger)i
+{
+	NSEnumerator *e = [misspelled objectEnumerator];
+	NSValue *v;
+	while ((v = [e nextObject]) != nil)
+		if (NSLocationInRange(i, [v rangeValue]))
+			return [v rangeValue];
+	return NSMakeRange(NSNotFound, 0);
+}
+
+- (void) replaceMisspelling: (NSMenuItem *)it
+{
+	NSRange r = NSRangeFromString([[it representedObject] objectAtIndex: 0]);
+	NSString *with = [[it representedObject] objectAtIndex: 1];
+	if (NSMaxRange(r) <= [[self textStorage] length] && [self shouldChangeTextInRange: r replacementString: with]) {
+		[[self textStorage] replaceCharactersInRange: r withString: with];
+		[self didChangeText];
+	}
+	[self checkSpelling];
+}
+
+- (void) learnSpelling: (NSMenuItem *)it
+{
+	[[Mail2Spell shared] learn: [it representedObject]];
+	[self checkSpelling];
+}
+
+/* a right-click on an underlined word: its suggestions and Learn Spelling, then the usual items */
+- (NSMenu *) menuForEvent: (NSEvent *)ev
+{
+	NSMenu *base = [super menuForEvent: ev];
+	NSPoint p = [self convertPoint: [ev locationInWindow] fromView: nil];
+	NSUInteger i = [self characterIndexForPoint: [[self window] convertBaseToScreen: [ev locationInWindow]]];
+	(void)p;
+	NSRange r = [self misspellingAt: i];
+	if (r.location == NSNotFound)
+		return base;
+	NSString *word = [[self string] substringWithRange: r];
+	NSMenu *m = [[[NSMenu alloc] initWithTitle: @""] autorelease];
+	NSArray *sug = [[Mail2Spell shared] suggestionsFor: word];
+	NSEnumerator *e = [sug objectEnumerator];
+	NSString *sg;
+	while ((sg = [e nextObject]) != nil) {
+		NSMenuItem *it = (NSMenuItem *)[m addItemWithTitle: sg action: @selector(replaceMisspelling:) keyEquivalent: @""];
+		[it setTarget: self];
+		[it setRepresentedObject: [NSArray arrayWithObjects: NSStringFromRange(r), sg, nil]];
+	}
+	if ([sug count] == 0)
+		[[m addItemWithTitle: @"No Guesses Found" action: NULL keyEquivalent: @""] setEnabled: NO];
+	[m addItem: [NSMenuItem separatorItem]];
+	NSMenuItem *learn = (NSMenuItem *)[m addItemWithTitle: [NSString stringWithFormat: @"Learn “%@”", word]
+	    action: @selector(learnSpelling:) keyEquivalent: @""];
+	[learn setTarget: self];
+	[learn setRepresentedObject: word];
+	if (base != nil && [base numberOfItems] > 0) {
+		[m addItem: [NSMenuItem separatorItem]];
+		NSArray *items = [[[base itemArray] copy] autorelease];
+		NSEnumerator *be = [items objectEnumerator];
+		NSMenuItem *bi;
+		while ((bi = [be nextObject]) != nil) {
+			[base removeItem: bi];
+			[m addItem: bi];
+		}
+	}
+	return m;
+}
 - (NSDragOperation) draggingEntered: (id <NSDraggingInfo>)info
 {
 	if ([[[info draggingPasteboard] types] containsObject: NSFilenamesPboardType])
@@ -352,6 +462,7 @@ signature_block(Mail2Session *s)
 
 - (void) textDidChange: (NSNotification *)n
 {
+	[(Mail2BodyView *)bodyView checkSpellingSoon];
 	[self setDirty: YES];
 }
 

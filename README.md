@@ -6,9 +6,9 @@
 
 ## Status
 
-As of November 8, 2026 (version 0.5):
+As of November 8, 2026 (version 0.6):
 
-- **Works, tested against a real IMAP/SMTP server** (GreenMail, natively on the Mac, 116 checks in `tests/`): TLS with certificate checks, login, mailbox list with the special mailboxes found, the first sync and later ones, new mail pushed through IDLE, reading (plain text, HTML as text, attachments), read/unread and flags both ways, archive and delete (MOVE, or COPY + EXPUNGE), sending with SMTP (AUTH PLAIN/LOGIN), the Sent copy, the Maildir files and the index; and since 0.2 sending files (binary and non-ASCII names round trip), conversations (References), local and server search, fetching mail older than the first sync, and drafts saved, replaced and removed on the server; since 0.3 All Inboxes across two accounts, and OAuth: XOAUTH2 logins to IMAP and SMTP, token refresh (with Microsoft's refresh-token rotation), the device-code flow, the browser flow with PKCE, a revoked sign-in and Cancel, against a stand-in for the providers (`tests/oauth_mock.py`). TLS was also checked against `imap.gmail.com:993`.
+- **Works, tested against a real IMAP/SMTP server** (GreenMail, natively on the Mac, 132 checks in `tests/`): TLS with certificate checks, login, mailbox list with the special mailboxes found, the first sync and later ones, new mail pushed through IDLE, reading (plain text, HTML as text, attachments), read/unread and flags both ways, archive and delete (MOVE, or COPY + EXPUNGE), sending with SMTP (AUTH PLAIN/LOGIN), the Sent copy, the Maildir files and the index; and since 0.2 sending files (binary and non-ASCII names round trip), conversations (References), local and server search, fetching mail older than the first sync, and drafts saved, replaced and removed on the server; since 0.3 All Inboxes across two accounts, and OAuth: XOAUTH2 logins to IMAP and SMTP, token refresh (with Microsoft's refresh-token rotation), the device-code flow, the browser flow with PKCE, a revoked sign-in and Cancel, against a stand-in for the providers (`tests/oauth_mock.py`). TLS was also checked against `imap.gmail.com:993`.
 - **Built for the Pi and run end to end under QEMU** on the real desktop (Window Maker, Naples, Milan): it syncs the Inbox from a server on the host, opens a conversation of three, shows a message and marks it read on the server, updates the dock badge, searches, reopens a draft with its attachment from the server's Drafts and sends it (the server receives it with `plan.pdf`, and Drafts is empty after), and sends a message typed into the compose window (`tools/qemu_shots.sh`, screenshots in `docs/`).
 - **HTML mail in WebKit, under QEMU**: with Florence's engine copied into the image (`FLORENCE_DEPLOY=… tools/qemu_shots.sh`), an HTML message is drawn by WebKit in the message pane (`docs/qemu-html.png`). The first HTML message starts WebKit's processes; under QEMU that held the window for about 17 seconds, once. Not yet measured on the Pi.
 - Things this port taught it: signals interrupt blocking calls on every thread (libetpan's own socket reads gave up on EINTR, so Mail2 has its own stream driver for plain connections too); GNUstep redraws only after an event (Mail2 posts one after background results); and GNUstep's Tab order is not used (the compose window and account panel set their own).
@@ -27,6 +27,11 @@ As of November 8, 2026 (version 0.5):
 - Reply, Reply All, Forward, New Message (plain text, UTF-8), with To, Cc and Bcc. Replies thread properly (In-Reply-To, References) and mark the original as answered.
 - Addresses complete as you type in To, Cc and Bcc, from the people in your mail (senders, and whom you wrote to), the most frequent first; Tab, Return or a comma keeps the completion.
 - A signature per account (Accounts… > Edit), added under `-- ` to new messages, replies and forwards, and swapped when you change From.
+- Rich text (Format menu): bold, italic, underline, size, links (Cmd-K), bulleted and numbered lists, quote levels; pictures inline (dropped, attached or pasted). Sent as plain text and HTML when there is formatting, plain text otherwise; Format > Make Plain Text, or `Mail2ComposeRich NO` to start plain. Drafts keep their formatting on this machine.
+- Spelling: Hunspell with the en_US dictionary underlines misspelled words as you type (not in quotes, links or addresses); a right-click offers suggestions and Learn Spelling.
+- Undo Send: a message waits 5 seconds (`Mail2UndoSendDelay`) with an Undo button under the mailboxes. Send Later (File menu) schedules it. Every message goes through an Outbox kept on disk: one written offline, or refused, is tried again (30 s, 2, 5, then every 15 minutes), and the Outbox mailbox shows what waits, with Edit, Delete and Send Now.
+- Other addresses per account (aliases, in the account panel): the From menu offers them, and a reply comes from the one the message was sent to.
+- Drag files onto a message to attach them; drag an attachment out of a message to put it in a folder. Pictures attached to plain-text mail show under the text.
 - Attach files (Attach… in the compose window or File > Attach File…; a click on a file's button takes it off). Forward sends the original's attachments along.
 - Drafts: File > Save as Draft (Cmd-S), every minute while there are unsaved changes, and on closing (Save / Don't Save). They go to the server's Drafts mailbox (made if there is none), each save replacing the last; in Drafts, Return, a double click or Message > Edit Draft (Cmd-E) opens one again, Bcc and attachments included, and sending it removes it.
 - Conversations: the list shows each conversation once, newest message first, with its count; selecting it opens it and lists its other messages under it (View > Organize by Conversation turns this off). Archive, Delete, Flag and Read on a closed conversation apply to all of it.
@@ -47,7 +52,6 @@ As of November 8, 2026 (version 0.5):
 
 ## What you cannot do (yet)
 
-- No rich text when writing: messages are plain text.
 - Remote content in HTML mail (images and styles from the web) is not loaded unless you ask: a bar over such a message says so, and its Load Remote Content button loads them for that message, with Florence's content-blocker list applied so the trackers on it still do not load. `Mail2LoadRemoteContent YES` loads them always (with the list). JavaScript never runs. Inline images (`cid:`) are always shown. A list cannot know every sender's own tracking pixel, which is why loading stays off by default.
 - Conversations are made from References and In-Reply-To only; a reply from a program that sends neither stands alone. They are per mailbox (a conversation does not pull in your replies from Sent).
 - No address book beyond completing from your mail. Rules have one condition each. Search in All Inboxes covers what is downloaded (the server search is per mailbox).
@@ -126,6 +130,8 @@ On the Pi, `MAIL2_DEBUG=1 /Applications/Mail2.app/Mail2` logs the IMAP and SMTP 
 | `Mail2Message.m` | reading (MIME, HTML to text) and building messages |
 | `Mail2Store.m` | the SQLite index and the Maildir files |
 | `Mail2Account.m`, `Mail2Util.m`, `MilanText.m` | settings, helpers, font fallback (from Milan) |
+| `Mail2RichText.m`, `Mail2Outbox.m`, `Mail2Spell.m` | formatted text to HTML, the Outbox, spelling (Hunspell) |
+| `dict/` | the en_US Hunspell dictionary and its licence |
 | `Mail2Rules.m`, `Mail2RulesWindow.m` | rules for new mail, and their window |
 | `Mail2OAuth.m` | OAuth sign-in (browser with PKCE, device code), token refresh, the small HTTPS client |
 | `icons/`, `tools/make_icons.sh`, `tools/make_icon.m` | Lucide glyphs, the envelope-and-stamp app icon, and their generators |
@@ -135,4 +141,4 @@ On the Pi, `MAIL2_DEBUG=1 /Applications/Mail2.app/Mail2` logs the IMAP and SMTP 
 
 ## Licence
 
-MIT, see `LICENSE`. The icons are Lucide (ISC). Mail2 links libetpan (BSD-3-Clause), SQLite (public domain), Mbed TLS (Apache-2.0) and libxml2 (MIT), which keep their own licences.
+MIT, see `LICENSE`. The icons are Lucide (ISC). Mail2 links libetpan (BSD-3-Clause), SQLite (public domain), Mbed TLS (Apache-2.0), libxml2 (MIT) and Hunspell (used under the MPL 1.1), which keep their own licences; its en_US dictionary (`dict/`) is SCOWL's, under the notices in `dict/README_en_US.txt`. HTML mail is shown by Florence's WebKit (LGPL), loaded at run time.
