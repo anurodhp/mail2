@@ -32,6 +32,6 @@ for l in libetpan libsqlite3 libmbedcrypto libmbedx509 libmbedtls; do
 done
 # unpacked beside the old app and swapped in, so a failed transfer leaves the old one
 tar -C "$GSROOT/Applications" -cf - Mail2.app |
-    ssh "$HOST" 'pkill -x Mail2; rm -rf /Applications/.Mail2.new && mkdir /Applications/.Mail2.new && tar -C /Applications/.Mail2.new -xf - &&
+    ssh "$HOST" 'for p in $(ps -ax -o pid=,comm= | while read -r pid comm; do case "$comm" in */Mail2|Mail2) echo $pid;; esac; done); do kill $p; done; sleep 1; rm -rf /Applications/.Mail2.new && mkdir /Applications/.Mail2.new && tar -C /Applications/.Mail2.new -xf - &&
         rm -rf /Applications/Mail2.app && mv /Applications/.Mail2.new/Mail2.app /Applications/Mail2.app && rmdir /Applications/.Mail2.new'
 echo "deployed Mail2.app and its libraries to $HOST"
