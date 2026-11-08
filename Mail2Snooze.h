@@ -15,7 +15,8 @@ extern NSString *const Mail2LaterChanged;
 {
 	NSMutableArray *snoozed;	/* {Account, MessageId, Until, From (mailbox name), Subject} */
 	NSMutableArray *followUps;	/* {Account, MessageId, Due, Subject, To} */
-	NSTimer *timer;
+	NSTimer *timer;			/* for the next snooze or reminder */
+	NSUInteger dueSeen;		/* reminders due when the window was last told */
 	id (^sessionFor)(NSString *account);
 }
 + (Mail2Later *) shared;
@@ -34,4 +35,5 @@ extern NSString *const Mail2LaterChanged;
 - (NSArray *) dueFollowUps;
 - (void) stopReminding: (NSString *)messageId;
 - (void) check;
+- (NSDate *) nextWake;		/* when its timer fires next; nil: none set */
 @end

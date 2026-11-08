@@ -28,6 +28,105 @@ static mbedtls_x509_crt cacert;
 static mbedtls_ssl_config conf;
 static int conf_ok;
 static char conf_err[160];
+
+/* The Pi 3's Cortex-A53 (BCM2837) has no ARMv8 crypto extensions, so AES runs in software, where ChaCha20-Poly1305 is
+ * two to three times faster. Mbed TLS's own order with the ChaCha20 suites moved to the front; servers that weigh the
+ * client's preference (Google's, Cloudflare's) then pick it, and the rest pick as before. */
+static int *suites;
+
+static void
+prefer_chacha(void)
+{
+	const int *all = mbedtls_ssl_list_ciphersuites();
+	size_t n = 0, k = 0, i;
+	int pass;
+	while (all[n] != 0)
+		n++;
+	suites = calloc(n + 1, sizeof(int));
+	if (suites == NULL)
+		return;
+	for (pass = 0; pass < 2; pass++)
+		for (i = 0; i < n; i++) {
+			const mbedtls_ssl_ciphersuite_t *info = mbedtls_ssl_ciphersuite_from_id(all[i]);
+			int chacha = info != NULL && strstr(mbedtls_ssl_ciphersuite_get_name(info), "CHACHA20") != NULL;
+			if (chacha == (pass == 0))
+				suites[k++] = all[i];
+		}
+	mbedtls_ssl_conf_ciphersuites(&conf, suites);
+}
+
+/* Sessions to resume, by server: a reconnection (IDLE every half hour, each message sent, each token fetched) then
+ * skips the certificate chain and its signature checks, the dearest part of a handshake on this CPU. TLS 1.2 keeps
+ * the session from the handshake; TLS 1.3 the latest ticket the server sent after it. The server still decides:
+ * a session it no longer knows is a full handshake, as before. */
+#define CACHE_SLOTS 16
+static struct cached {
+	char key[300];
+	mbedtls_ssl_session session;
+	int used;
+	unsigned long stamp;
+} cache[CACHE_SLOTS];
+static unsigned long cache_clock;
+static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void
+cache_key(int fd, const char *host, char *key, size_t len)
+{
+	struct sockaddr_storage ss;
+	socklen_t sl = sizeof(ss);
+	int port = 0;
+	if (getpeername(fd, (struct sockaddr *)&ss, &sl) == 0)
+		port = ntohs(ss.ss_family == AF_INET6 ? ((struct sockaddr_in6 *)&ss)->sin6_port : ((struct sockaddr_in *)&ss)->sin_port);
+	snprintf(key, len, "%s:%d", host, port);
+}
+
+/* the connection's session, if it has one to give, kept for its server (replacing what was there) */
+static void
+cache_store(const char *key, mbedtls_ssl_context *ssl)
+{
+	mbedtls_ssl_session s;
+	int i, slot = -1;
+	mbedtls_ssl_session_init(&s);
+	if (mbedtls_ssl_get_session(ssl, &s) != 0) {
+		mbedtls_ssl_session_free(&s);
+		return;
+	}
+	pthread_mutex_lock(&cache_lock);
+	for (i = 0; i < CACHE_SLOTS; i++)
+		if (cache[i].used && strcmp(cache[i].key, key) == 0)
+			slot = i;
+	for (i = 0; slot < 0 && i < CACHE_SLOTS; i++)
+		if (!cache[i].used)
+			slot = i;
+	if (slot < 0) {	/* full: the oldest goes */
+		slot = 0;
+		for (i = 1; i < CACHE_SLOTS; i++)
+			if (cache[i].stamp < cache[slot].stamp)
+				slot = i;
+	}
+	if (cache[slot].used)
+		mbedtls_ssl_session_free(&cache[slot].session);
+	snprintf(cache[slot].key, sizeof(cache[slot].key), "%s", key);
+	cache[slot].session = s;	/* moved, not copied: s is not freed here */
+	cache[slot].used = 1;
+	cache[slot].stamp = ++cache_clock;
+	pthread_mutex_unlock(&cache_lock);
+}
+
+/* offers the server's kept session, if any; 1 if one was offered */
+static int
+cache_offer(const char *key, mbedtls_ssl_context *ssl)
+{
+	int i, offered = 0;
+	pthread_mutex_lock(&cache_lock);
+	for (i = 0; i < CACHE_SLOTS; i++)
+		if (cache[i].used && strcmp(cache[i].key, key) == 0) {
+			offered = mbedtls_ssl_set_session(ssl, &cache[i].session) == 0;
+			cache[i].stamp = ++cache_clock;
+		}
+	pthread_mutex_unlock(&cache_lock);
+	return offered;
+}
 static pthread_once_t conf_once = PTHREAD_ONCE_INIT;
 
 static void
@@ -59,6 +158,9 @@ setup_conf(void)
 	mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_REQUIRED);
 	mbedtls_ssl_conf_ca_chain(&conf, &cacert, NULL);
 	mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &drbg);
+	prefer_chacha();
+	/* TLS 1.3 tickets are ignored unless asked for; then a read returns ..._RECEIVED_NEW_SESSION_TICKET for each */
+	mbedtls_ssl_conf_tls13_enable_signal_new_session_tickets(&conf, MBEDTLS_SSL_TLS1_3_SIGNAL_NEW_SESSION_TICKETS_ENABLED);
 	conf_ok = 1;
 }
 
@@ -66,6 +168,8 @@ struct tls_data {
 	int fd;
 	int timeout_ms;
 	mbedtls_ssl_context ssl;
+	char key[300];		/* host:port, for the session cache */
+	int resumed;		/* the handshake resumed a kept session (no certificate came) */
 };
 
 /* A blocking call interrupted by a signal is retried. libetpan's own socket driver does not retry its select() and
@@ -130,9 +234,12 @@ tls_read(mailstream_low *s, void *buf, size_t count)
 		int r = mbedtls_ssl_read(&t->ssl, buf, count);
 		if (r >= 0)
 			return r;
-		/* TLS 1.3 servers send session tickets after the handshake: not data, read on */
-		if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE ||
-		    r == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET)
+		/* TLS 1.3 servers send session tickets after the handshake: not data; kept, and read on */
+		if (r == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) {
+			cache_store(t->key, &t->ssl);
+			continue;
+		}
+		if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
 			continue;
 		if (r == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
 			return 0;
@@ -276,9 +383,19 @@ tls_open(int fd, const char *host, int timeout_s, char *err, size_t errlen)
 		goto fail;
 	}
 	mbedtls_ssl_set_bio(&t->ssl, t, bio_send, bio_recv, NULL);
-	while ((r = mbedtls_ssl_handshake(&t->ssl)) != 0) {
-		if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
+	cache_key(fd, host, t->key, sizeof(t->key));
+	int offered = cache_offer(t->key, &t->ssl), saw_cert = 0;
+	/* step by step, to see whether the server sent its certificate (a full handshake) or resumed */
+	while (!mbedtls_ssl_is_handshake_over(&t->ssl)) {
+		if (t->ssl.MBEDTLS_PRIVATE(state) == MBEDTLS_SSL_SERVER_CERTIFICATE)
+			saw_cert = 1;
+		r = mbedtls_ssl_handshake_step(&t->ssl);
+		if (r == 0 || r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
 			continue;
+		if (r == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) {
+			cache_store(t->key, &t->ssl);
+			continue;
+		}
 		if (r == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED)
 			snprintf(err, errlen, "Cannot verify %s: %s.", host, verify_reason(mbedtls_ssl_get_verify_result(&t->ssl)));
 		else if (r == MBEDTLS_ERR_SSL_TIMEOUT)
@@ -289,6 +406,15 @@ tls_open(int fd, const char *host, int timeout_s, char *err, size_t errlen)
 			snprintf(err, errlen, "TLS handshake with %s failed: %s", host, e);
 		}
 		goto fail;
+	}
+	t->resumed = offered && !saw_cert;
+	if (mbedtls_ssl_get_version_number(&t->ssl) == MBEDTLS_SSL_VERSION_TLS1_2)
+		cache_store(t->key, &t->ssl);	/* 1.3's come later, as tickets */
+	{
+		const char *d = getenv("MAIL2_DEBUG");
+		if (d && *d == '1')
+			fprintf(stderr, "mail2: TLS with %s: %s, %s%s\n", t->key, mbedtls_ssl_get_version(&t->ssl),
+			    mbedtls_ssl_get_ciphersuite(&t->ssl), t->resumed ? ", resumed" : "");
 	}
 	low = mailstream_low_new(t, &tls_driver);
 	if (low != NULL)
@@ -409,5 +535,19 @@ mail2_starttls(mailstream *s, const char *host, char *err, size_t errlen)
 	/* the plain driver's free does not close the descriptor, which TLS now owns */
 	mailstream_low_free(plain);
 	mailstream_set_low(s, low);
+	return 0;
+}
+
+int
+mail2_tls_info(mailstream *s, const char **suite, int *resumed)
+{
+	mailstream_low *low = mailstream_get_low(s);
+	if (low == NULL || low->driver != &tls_driver)
+		return -1;
+	struct tls_data *t = low->data;
+	if (suite)
+		*suite = mbedtls_ssl_get_ciphersuite(&t->ssl);
+	if (resumed)
+		*resumed = t->resumed;
 	return 0;
 }

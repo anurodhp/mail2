@@ -29,7 +29,10 @@ later_path(void)
 	NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile: later_path()];
 	snoozed = [[NSMutableArray alloc] initWithArray: [d objectForKey: @"Snoozed"] ? [d objectForKey: @"Snoozed"] : [NSArray array]];
 	followUps = [[NSMutableArray alloc] initWithArray: [d objectForKey: @"FollowUps"] ? [d objectForKey: @"FollowUps"] : [NSArray array]];
-	timer = [[NSTimer scheduledTimerWithTimeInterval: 60 target: self selector: @selector(timerFired:) userInfo: nil repeats: YES] retain];
+	/* a reply to a reminded message arrives with new mail: look then, not on a clock */
+	[[NSNotificationCenter defaultCenter] addObserver: self selector: @selector(messagesChanged:) name: Mail2MessagesChanged object: nil];
+	dueSeen = [self countDue];
+	[self reschedule];
 	return self;
 }
 
@@ -37,12 +40,60 @@ later_path(void)
 {
 	[sessionFor release];
 	sessionFor = [lookup copy];
+	[self check];
 }
 
 - (void) save
 {
 	[[NSDictionary dictionaryWithObjectsAndKeys: snoozed, @"Snoozed", followUps, @"FollowUps", nil] writeToFile: later_path() atomically: YES];
+	dueSeen = [self countDue];
 	[[NSNotificationCenter defaultCenter] postNotificationName: Mail2LaterChanged object: self];
+	[self reschedule];
+}
+
+- (NSUInteger) countDue
+{
+	NSUInteger n = 0;
+	NSEnumerator *e = [followUps objectEnumerator];
+	NSDictionary *d;
+	while ((d = [e nextObject]) != nil)
+		if ([[d objectForKey: @"Due"] timeIntervalSinceNow] <= 0)
+			n++;
+	return n;
+}
+
+/* One timer, for the next snooze to end or reminder to come due, instead of one a minute; none with nothing waiting.
+ * Never more than 15 minutes ahead, in case the clock jumps (the Pi has none of its own until the network sets it). */
+- (void) reschedule
+{
+	NSTimeInterval wait = -1;
+	NSEnumerator *e = [snoozed objectEnumerator];
+	NSDictionary *d;
+	while ((d = [e nextObject]) != nil) {
+		NSTimeInterval in = MAX([[d objectForKey: @"Until"] timeIntervalSinceNow], 30.0);	/* overdue: its session was not there */
+		if (wait < 0 || in < wait)
+			wait = in;
+	}
+	e = [followUps objectEnumerator];
+	while ((d = [e nextObject]) != nil) {
+		NSTimeInterval in = [[d objectForKey: @"Due"] timeIntervalSinceNow];
+		if (in > 0 && (wait < 0 || in < wait))
+			wait = in;
+	}
+	[timer invalidate];
+	[timer autorelease];	/* it may be the one firing */
+	timer = nil;
+	if (wait < 0)
+		return;
+	timer = [[NSTimer alloc] initWithFireDate: [NSDate dateWithTimeIntervalSinceNow: MIN(wait + 1, 900.0)] interval: 0
+	    target: self selector: @selector(timerFired:) userInfo: nil repeats: NO];
+	[[NSRunLoop currentRunLoop] addTimer: timer forMode: NSDefaultRunLoopMode];
+}
+
+- (void) messagesChanged: (NSNotification *)n
+{
+	if ([followUps count])
+		[self check];
 }
 
 /* ---- snooze ---- */
@@ -126,7 +177,7 @@ later_path(void)
 	NSEnumerator *e = [[NSArray arrayWithArray: snoozed] objectEnumerator];
 	NSDictionary *d;
 	while ((d = [e nextObject]) != nil)
-		if ([[d objectForKey: @"Until"] timeIntervalSinceNow] <= 0) {
+		if ([[d objectForKey: @"Until"] timeIntervalSinceNow] <= 0 && sessionFor && sessionFor([d objectForKey: @"Account"])) {
 			[self wakeItem: d];
 			changed = YES;
 		}
@@ -139,10 +190,18 @@ later_path(void)
 		}
 	if (changed)
 		[self save];
-	else
+	else if ([self countDue] != dueSeen) {	/* a reminder's day came: Follow Up shows it */
+		dueSeen = [self countDue];
 		[[NSNotificationCenter defaultCenter] postNotificationName: Mail2LaterChanged object: self];
+	}
 }
 
-- (void) timerFired: (NSTimer *)t { [self check]; }
+- (void) timerFired: (NSTimer *)t
+{
+	[self check];
+	[self reschedule];
+}
+
+- (NSDate *) nextWake { return [timer isValid] ? [timer fireDate] : nil; }
 
 @end

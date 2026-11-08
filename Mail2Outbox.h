@@ -29,6 +29,7 @@ extern NSString *const Mail2OutboxChanged;
 /* takes it out without sending: its message and details for the compose window (nil if it is already going) */
 - (NSDictionary *) takeBack: (NSString *)ident;
 - (void) sendNow: (NSString *)ident;
-- (void) tick;			/* sends what is due (the timer calls it) */
+- (void) tick;			/* sends what is due, and sets the timer for what is next */
 - (BOOL) isSending: (NSString *)ident;
+- (NSDate *) nextWake;		/* when its timer fires next; nil: none set */
 @end

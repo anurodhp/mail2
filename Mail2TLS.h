@@ -14,5 +14,7 @@
 mailstream *mail2_connect(const char *host, int port, int tls, int timeout_s, char *err, size_t errlen);
 /* replaces the stream's plain transport with TLS over the same socket; 0 on success */
 int mail2_starttls(mailstream *s, const char *host, char *err, size_t errlen);
+/* a TLS stream's cipher suite, and whether its handshake resumed an earlier session; -1 for a plain stream */
+int mail2_tls_info(mailstream *s, const char **suite, int *resumed);
 
 #endif

@@ -53,7 +53,7 @@ path_for(NSString *ident, NSString *ext)
 	[items sortUsingComparator: ^NSComparisonResult(id a, id b) {
 		return [[a objectForKey: @"SendAt"] compare: [b objectForKey: @"SendAt"]];
 	}];
-	timer = [[NSTimer scheduledTimerWithTimeInterval: 1.0 target: self selector: @selector(timerFired:) userInfo: nil repeats: YES] retain];
+	[self reschedule];
 	return self;
 }
 
@@ -61,6 +61,43 @@ path_for(NSString *ident, NSString *ext)
 {
 	[sessionFor release];
 	sessionFor = [lookup copy];
+	[self tick];
+}
+
+/* One timer, set for the next thing due (an item's send time or retry, which is also where its Undo moment ends),
+ * instead of one every second: with nothing waiting the Outbox wakes no one. What is due but cannot go yet (its
+ * account's session is not there) is looked at again in 30 s; and never more than 15 minutes ahead, in case the
+ * clock jumps (the Pi has no clock of its own until the network sets it). */
+#define RETRY_SOON 30.0
+#define LONGEST_WAIT 900.0
+
+- (void) reschedule
+{
+	if (![NSThread isMainThread]) {
+		[self performSelectorOnMainThread: @selector(reschedule) withObject: nil waitUntilDone: NO];
+		return;
+	}
+	NSTimeInterval wait = -1;
+	NSEnumerator *e = [items objectEnumerator];
+	NSDictionary *d;
+	while ((d = [e nextObject]) != nil) {
+		if ([sending containsObject: [d objectForKey: @"Id"]])
+			continue;	/* its completion reschedules */
+		NSDate *due = [d objectForKey: @"NextTry"] ? [d objectForKey: @"NextTry"] : [d objectForKey: @"SendAt"];
+		NSTimeInterval in = [due timeIntervalSinceNow];
+		if (in <= 0)
+			in = RETRY_SOON;	/* due, yet tick could not send it */
+		if (wait < 0 || in < wait)
+			wait = in;
+	}
+	[timer invalidate];
+	[timer autorelease];	/* it may be the one firing */
+	timer = nil;
+	if (wait < 0)
+		return;
+	timer = [[NSTimer alloc] initWithFireDate: [NSDate dateWithTimeIntervalSinceNow: MIN(wait, LONGEST_WAIT)] interval: 0
+	    target: self selector: @selector(timerFired:) userInfo: nil repeats: NO];
+	[[NSRunLoop currentRunLoop] addTimer: timer forMode: NSDefaultRunLoopMode];
 }
 
 - (void) changed
@@ -128,6 +165,7 @@ path_for(NSString *ident, NSString *ext)
 	[r setObject: raw forKey: @"Message"];
 	[self drop: ident];
 	[self changed];
+	[self reschedule];
 	return r;
 }
 
@@ -209,11 +247,15 @@ backoff(int attempts)
 			[draft release];
 			[meta release];
 			[self changed];
+			[self reschedule];
 		}];
 		[self changed];
 	}
+	[self reschedule];
 }
 
 - (BOOL) isSending: (NSString *)ident { return [sending containsObject: ident]; }
+
+- (NSDate *) nextWake { return [timer isValid] ? [timer fireDate] : nil; }
 
 @end

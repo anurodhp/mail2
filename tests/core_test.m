@@ -103,8 +103,25 @@ test_tls(void)
 		MMAPString *line = mmap_string_new("");
 		char *l = mailstream_read_line_remove_eol(s, line);
 		CHECK(l != NULL && strncmp(l, "* OK", 4) == 0, "and greets over TLS: %.40s", l ? l : "(nothing)");
+		const char *suite = NULL;
+		int resumed = -1;
+		mail2_tls_info(s, &suite, &resumed);
+		BOOL chacha = suite != NULL && strstr(suite, "CHACHA20") != NULL;
+		CHECK(chacha && resumed == 0, "ChaCha20 preferred, a full handshake the first time (%s)", suite ? suite : "?");
+		/* LOGOUT, so the server's tickets are read before closing */
+		mailstream_write(s, "a LOGOUT\r\n", 10);
+		mailstream_flush(s);
+		while ((l = mailstream_read_line_remove_eol(s, line)) != NULL && strncmp(l, "a ", 2) != 0)
+			;
 		mmap_string_free(line);
 		mailstream_close(s);
+		s = mail2_connect("imap.gmail.com", 993, 1, 20, err, sizeof(err));
+		resumed = -1;
+		if (s != NULL)
+			mail2_tls_info(s, &suite, &resumed);
+		CHECK(s != NULL && resumed == 1, "the second connection resumes the session (%s)", s ? suite : err);
+		if (s)
+			mailstream_close(s);
 	}
 }
 
@@ -838,9 +855,12 @@ main(void)
 		NSString *path = [[Mail2SupportDirectory() stringByAppendingPathComponent: @"Outbox"] stringByAppendingPathComponent:
 		    [later stringByAppendingPathExtension: @"eml"]];
 		CHECK(later != nil && [[NSFileManager defaultManager] fileExistsAtPath: path], "queued on disk for later");
+		NSTimeInterval wake = [[ob nextWake] timeIntervalSinceNow];
+		CHECK(wake > 800 && wake <= 900, "the Outbox sleeps until then (at most 15 minutes): %.0f s", wake);
 		NSDictionary *back = [ob takeBack: later];
 		CHECK(back != nil && [[back objectForKey: @"Message"] isEqualToData: m1] && ![[NSFileManager defaultManager] fileExistsAtPath: path] &&
 		    [[ob items] count] == 0, "Undo Send takes it back, files and all");
+		CHECK([ob nextWake] == nil, "an empty Outbox has no timer");
 		NSData *m2 = Mail2BuildMessage(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, @"outbox now zebu", @"x", nil, nil);
 		[ob add: m2 details: [NSDictionary dictionaryWithObjectsAndKeys: @"test2@localhost", @"Account",
 		    [NSArray arrayWithObject: @"test1@localhost"], @"Recipients", nil]];
@@ -993,6 +1013,8 @@ main(void)
 		[zs syncMailbox: snz];
 		wait_for(^BOOL { return ![zs isBusy]; }, 20);
 		CHECK(away && snz != nil && [[later snoozed] count] == 1, "snoozed: in a Snoozed mailbox made on the server");
+		NSTimeInterval zw = [[later nextWake] timeIntervalSinceNow];
+		CHECK(zw > 800 && zw <= 901, "Snooze sleeps until it is due (at most 15 minutes): %.0f s", zw);
 		[later wake: mid];
 		BOOL back = wait_for(^BOOL {
 			if ([zs isBusy]) return NO;
@@ -1011,8 +1033,9 @@ main(void)
 		    @"yes", @"<follow-1@localhost>", [NSArray arrayWithObject: @"<follow-1@localhost>"], nil, nil);
 		Mail2SendMessage(a2, f2, [NSArray arrayWithObject: @"test1@localhost"], &err);
 		BOOL answered = wait_for(^BOOL { [zs syncMailbox: ib]; wait_for(^BOOL { return ![zs isBusy]; }, 10);
-			[later check]; return [[later dueFollowUps] count] == 0; }, 30);
-		CHECK(answered, "answered: the reminder goes");
+			NSDictionary *lp = [NSDictionary dictionaryWithContentsOfFile: [Mail2SupportDirectory() stringByAppendingPathComponent: @"Later.plist"]];
+			return [[lp objectForKey: @"FollowUps"] count] == 0; }, 30);
+		CHECK(answered && [[later dueFollowUps] count] == 0, "answered: the reminder goes when the reply arrives (no clock)");
 		[zs release];
 	}
 
