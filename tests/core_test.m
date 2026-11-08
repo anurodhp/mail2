@@ -1,0 +1,424 @@
+/* core_test: Mail2's mail core against a real IMAP/SMTP server (GreenMail on 127.0.0.1, started by
+ * tests/run_host_tests.sh). Exits 0 when every check passes. */
+#import <Foundation/Foundation.h>
+#import "Mail2Account.h"
+#import "Mail2IMAP.h"
+#import "Mail2SMTP.h"
+#import "Mail2Message.h"
+#import "Mail2Store.h"
+#import "Mail2Session.h"
+#import "Mail2Util.h"
+#include "Mail2TLS.h"
+#include <libetpan/mailstream.h>
+#include <libetpan/mailstream_helper.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static int failures, checks;
+
+#define CHECK(cond, ...) do { checks++; if (cond) printf("  ok    "); else { failures++; printf("  FAIL  "); } \
+	printf("%s\n", [[NSString stringWithFormat: @__VA_ARGS__] UTF8String]); fflush(stdout); } while (0)
+
+static Mail2Account *
+account(NSString *user, NSString *pw)
+{
+	Mail2Account *a = [Mail2Account accountForEmail: user];
+	[a setFullName: @"Test Üser"];
+	[a setPassword: pw];
+	[a setImapHost: @"127.0.0.1"];
+	[a setImapPort: 3143];
+	[a setImapSecurity: Mail2SecurityNone];
+	[a setSmtpHost: @"127.0.0.1"];
+	[a setSmtpPort: 3025];
+	[a setSmtpSecurity: Mail2SecurityNone];
+	return a;
+}
+
+static const char *html_message =
+	"From: \"Ann Example\" <ann@example.com>\r\n"
+	"To: test1@localhost\r\n"
+	"Subject: =?UTF-8?Q?Quarterly_r=C3=A9port?=\r\n"
+	"Message-ID: <html-1@example.com>\r\n"
+	"References: <a@example.com> <b@example.com>\r\n"
+	"Date: Fri, 06 Nov 2026 10:00:00 +0100\r\n"
+	"MIME-Version: 1.0\r\n"
+	"Content-Type: multipart/mixed; boundary=\"MIX\"\r\n"
+	"\r\n"
+	"--MIX\r\n"
+	"Content-Type: multipart/alternative; boundary=\"ALT\"\r\n"
+	"\r\n"
+	"--ALT\r\n"
+	"Content-Type: text/plain; charset=iso-8859-1\r\n"
+	"Content-Transfer-Encoding: quoted-printable\r\n"
+	"\r\n"
+	"Hello, here is the r=E9port.\r\n"
+	"\r\n"
+	"--ALT\r\n"
+	"Content-Type: text/html; charset=utf-8\r\n"
+	"\r\n"
+	"<html><head><style>p{color:red}</style></head><body><h1>Report</h1><p>Hello,&nbsp;here is the <b>report</b>.</p>"
+	"<ul><li>One</li><li>Two</li></ul><script>alert(1)</script></body></html>\r\n"
+	"--ALT--\r\n"
+	"\r\n"
+	"--MIX\r\n"
+	"Content-Type: text/plain; name=\"report.txt\"\r\n"
+	"Content-Disposition: attachment; filename=\"report.txt\"\r\n"
+	"Content-Transfer-Encoding: base64\r\n"
+	"\r\n"
+	"bnVtYmVycyBnbyBoZXJlCg==\r\n"
+	"--MIX--\r\n";
+
+/* runs the main run loop until the condition holds or the time is up */
+static BOOL
+wait_for(BOOL (^cond)(void), double seconds)
+{
+	NSDate *end = [NSDate dateWithTimeIntervalSinceNow: seconds];
+	while (!cond() && [end timeIntervalSinceNow] > 0)
+		[[NSRunLoop currentRunLoop] runMode: NSDefaultRunLoopMode beforeDate: [NSDate dateWithTimeIntervalSinceNow: 0.1]];
+	return cond();
+}
+
+static void
+test_tls(void)
+{
+	char err[256];
+	printf("TLS\n");
+	mailstream *s = mail2_connect("127.0.0.1", 3993, 1, 10, err, sizeof(err));
+	CHECK(s == NULL && strstr(err, "trusted") != NULL, "a self-signed certificate is refused (%s)", err);
+	if (s)
+		mailstream_close(s);
+	if (getenv("NETWORK_TLS") && *getenv("NETWORK_TLS") == '0')
+		return;
+	s = mail2_connect("imap.gmail.com", 993, 1, 20, err, sizeof(err));
+	CHECK(s != NULL, "imap.gmail.com:993 verifies against the CA bundle %s", s ? "" : err);
+	if (s != NULL) {
+		MMAPString *line = mmap_string_new("");
+		char *l = mailstream_read_line_remove_eol(s, line);
+		CHECK(l != NULL && strncmp(l, "* OK", 4) == 0, "and greets over TLS: %.40s", l ? l : "(nothing)");
+		mmap_string_free(line);
+		mailstream_close(s);
+	}
+}
+
+int
+main(void)
+{
+	NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+	NSString *err = nil;
+	Mail2Account *a1 = account(@"test1@localhost", @"pw1"), *a2 = account(@"test2@localhost", @"pw2");
+
+	test_tls();
+
+	printf("Headers\n");
+	CHECK([Mail2DecodeHeader("=?UTF-8?B?R3LDvMOfZQ==?= world") isEqualToString: @"Grüße world"], "RFC 2047 decode");
+	CHECK([Mail2DecodeMailboxName("Entw&APw-rfe") isEqualToString: @"Entwürfe"], "modified UTF-7 mailbox name");
+	CHECK([Mail2DecodeHeader([Mail2EncodeHeader(@"Grüße ✓ — a longer subject line that must be split into words") UTF8String])
+	    isEqualToString: @"Grüße ✓ — a longer subject line that must be split into words"], "RFC 2047 encode round trip");
+	NSArray *split = Mail2SplitAddresses(@"a@b.c, \"Last, First\" <f@l.org>; x@y.z");
+	CHECK([split count] == 3 && [Mail2AddressPart([split objectAtIndex: 1]) isEqualToString: @"f@l.org"], "address splitting");
+
+	printf("SMTP\n");
+	NSData *raw = Mail2BuildMessage([a2 fromAddress], [NSArray arrayWithObject: @"Test One <test1@localhost>"], nil,
+	    @"Grüße ✓", @"Héllo there,\nthis is line two.\n\n> quoted\n", @"<orig@x>", [NSArray arrayWithObjects: @"<r1@x>", @"<orig@x>", nil]);
+	CHECK(raw != nil, "message built (%lu bytes)", (unsigned long)[raw length]);
+	NSString *rawStr = [[[NSString alloc] initWithData: raw encoding: NSUTF8StringEncoding] autorelease];
+	CHECK([rawStr rangeOfString: @"Subject: =?UTF-8?B?"].location != NSNotFound, "subject encoded");
+	CHECK([rawStr rangeOfString: @"In-Reply-To: <orig@x>"].location != NSNotFound, "In-Reply-To written");
+	CHECK([rawStr rangeOfString: @"Content-Transfer-Encoding: quoted-printable"].location != NSNotFound, "quoted-printable body");
+	CHECK([rawStr rangeOfString: @"=?UTF-8?B?VGVzdCDDnHNlcg==?= <test2@localhost>"].location != NSNotFound, "From name encoded, unquoted");
+	CHECK(Mail2SendMessage(a2, raw, [NSArray arrayWithObject: @"test1@localhost"], &err), "sent through SMTP %@", err ? err : @"");
+	Mail2Account *bad = account(@"test2@localhost", @"wrong");
+	[bad setSmtpHost: @"127.0.0.1"];
+	CHECK(Mail2BuildMessage(@"x <not an address>", [NSArray arrayWithObject: @"a@b"], nil, @"s", @"b", nil, nil) == nil,
+	    "a bad From address is refused");
+
+	printf("IMAP\n");
+	Mail2IMAP *imap = [[Mail2IMAP alloc] initWithAccount: a1];
+	Mail2IMAP *wrong = [[Mail2IMAP alloc] initWithAccount: account(@"test1@localhost", @"nope")];
+	err = nil;
+	CHECK(![wrong connect: &err] && err != nil, "a wrong password is refused: %@", err);
+	err = nil;
+	CHECK([imap connect: &err], "logged in %@", err ? err : @"");
+	CHECK([imap createMailbox: @"Archive" error: &err] && [imap createMailbox: @"Trash" error: &err], "created Archive, Trash");
+	CHECK([imap appendMessage: [NSData dataWithBytes: html_message length: strlen(html_message)] to: @"INBOX" flags: 0 error: &err],
+	    "appended a multipart message %@", err ? err : @"");
+	NSArray *boxes = [imap listMailboxes: &err];
+	NSMutableDictionary *specials = [NSMutableDictionary dictionary];
+	NSEnumerator *e = [boxes objectEnumerator];
+	NSDictionary *d;
+	while ((d = [e nextObject]) != nil)
+		if ([d objectForKey: @"Special"])
+			[specials setObject: [d objectForKey: @"Name"] forKey: [d objectForKey: @"Special"]];
+	CHECK([[specials objectForKey: @"inbox"] isEqualToString: @"INBOX"] && [[specials objectForKey: @"archive"] isEqualToString: @"Archive"] &&
+	    [[specials objectForKey: @"trash"] isEqualToString: @"Trash"], "listed %lu mailboxes, specials %@", (unsigned long)[boxes count], specials);
+
+	unsigned validity = 0, next = 0, exists = 0;
+	CHECK([imap select: @"INBOX" uidValidity: &validity uidNext: &next exists: &exists error: &err] && exists == 2,
+	    "selected INBOX: %u messages, UIDVALIDITY %u, UIDNEXT %u", exists, validity, next);
+	NSArray *uids = [imap uidsSince: [NSDate dateWithTimeIntervalSinceNow: -30 * 86400.0] error: &err];
+	CHECK([uids count] == 2, "SEARCH SINCE: %@", uids);
+	CHECK([[imap uidsAbove: [[uids objectAtIndex: 0] unsignedIntValue] error: &err] count] == 1, "SEARCH UID n+1:*");
+	CHECK([[imap uidsAbove: [[uids lastObject] unsignedIntValue] error: &err] count] == 0, "SEARCH UID above the last is empty");
+
+	Mail2Store *store = [Mail2Store sharedStore];
+	[store setMailboxes: boxes forAccount: [a1 identifier]];
+	NSArray *mbs = [store mailboxesForAccount: [a1 identifier]];
+	Mail2Mailbox *inbox = [mbs objectAtIndex: 0];
+	CHECK([[inbox special] isEqualToString: @"inbox"] && [[inbox displayName] isEqualToString: @"Inbox"], "store: Inbox first of %lu", (unsigned long)[mbs count]);
+	NSArray *infos = [imap fetchHeaders: uids mailbox: [inbox mbid] error: &err];
+	CHECK([infos count] == 2, "fetched %lu envelopes %@", (unsigned long)[infos count], err ? err : @"");
+	Mail2MessageInfo *sent = nil, *html = nil;
+	e = [infos objectEnumerator];
+	Mail2MessageInfo *m;
+	while ((m = [e nextObject]) != nil) {
+		if ([[m subject] isEqualToString: @"Grüße ✓"]) sent = m;
+		if ([[m subject] isEqualToString: @"Quarterly réport"]) html = m;
+	}
+	CHECK(sent != nil && [[sent fromName] isEqualToString: @"Test Üser"] && [[sent fromAddr] isEqualToString: @"test2@localhost"],
+	    "envelope: %@ <%@> \"%@\"", [sent fromName], [sent fromAddr], [sent subject]);
+	CHECK(html != nil && [html hasAttachment] && [[html fromName] isEqualToString: @"Ann Example"], "multipart/mixed seen as having an attachment");
+	CHECK([[sent inReplyTo] isEqualToString: @"<orig@x>"], "In-Reply-To from the envelope: %@", [sent inReplyTo]);
+	[store addMessages: infos];
+	[store setUidValidity: validity uidNext: next forMailbox: [inbox mbid]];
+	NSArray *rows = [store messagesInMailbox: [inbox mbid] limit: 100];
+	CHECK([rows count] == 2 && [store unreadInMailbox: [inbox mbid]] == 2 && [store unreadInInboxes] == 2, "store: 2 rows, 2 unread");
+	[store addMessages: infos];
+	CHECK([[store messagesInMailbox: [inbox mbid] limit: 100] count] == 2, "adding again does not duplicate");
+
+	printf("Messages\n");
+	Mail2MessageInfo *row = nil;
+	e = [rows objectEnumerator];
+	while ((m = [e nextObject]) != nil)
+		if ([m uid] == [html uid]) row = m;
+	NSData *body = [imap fetchMessage: [row uid] error: &err];
+	CHECK(body != nil && [body length] == strlen(html_message), "downloaded %lu bytes", (unsigned long)[body length]);
+	Mail2ParsedMessage *pp = [Mail2ParsedMessage parseData: body preferPlainText: YES];
+	CHECK([[pp body] rangeOfString: @"here is the réport"].location != NSNotFound && ![pp bodyWasHTML], "plain part, Latin-1 to UTF-8: %@",
+	    [pp body]);
+	Mail2ParsedMessage *ph = [Mail2ParsedMessage parseData: body preferPlainText: NO];
+	CHECK([ph bodyWasHTML] && [[ph body] rangeOfString: @"Report\n\nHello, here is the report."].location != NSNotFound &&
+	    [[ph body] rangeOfString: @"• One\n• Two"].location != NSNotFound && [[ph body] rangeOfString: @"alert"].location == NSNotFound &&
+	    [[ph body] rangeOfString: @"color"].location == NSNotFound, "HTML to text: %@", [[ph body] stringByReplacingOccurrencesOfString: @"\n" withString: @"⏎"]);
+	CHECK([[pp attachments] count] == 1 && [[[[pp attachments] objectAtIndex: 0] filename] isEqualToString: @"report.txt"] &&
+	    [[[[NSString alloc] initWithData: [[[pp attachments] objectAtIndex: 0] data] encoding: NSUTF8StringEncoding] autorelease]
+	    isEqualToString: @"numbers go here\n"], "the attachment, decoded");
+	CHECK([[pp messageId] isEqualToString: @"<html-1@example.com>"] && [[pp references] count] == 2, "Message-ID and References");
+	CHECK([[pp snippet] hasPrefix: @"Hello, here is the réport."], "snippet: %@", [pp snippet]);
+	CHECK([store storeMessageData: body forMessage: row snippet: [pp snippet] attachment: YES], "written to the Maildir");
+	NSString *path = [store pathForMessage: row];
+	CHECK(path && [[NSFileManager defaultManager] fileExistsAtPath: path] && [path hasSuffix: @":2,"] &&
+	    [[path stringByDeletingLastPathComponent] hasSuffix: @"/INBOX/cur"], "Maildir file %@", [path lastPathComponent]);
+	[store setFlags: Mail2FlagSeen | Mail2FlagFlagged forMessage: [row rowid]];
+	NSString *path2 = [store pathForMessage: row];
+	CHECK([path2 hasSuffix: @":2,FS"] && [[NSFileManager defaultManager] fileExistsAtPath: path2] &&
+	    ![[NSFileManager defaultManager] fileExistsAtPath: path], "flags renamed it to %@", [path2 lastPathComponent]);
+	CHECK([[[store messageWithRowID: [row rowid]] snippet] hasPrefix: @"Hello"], "snippet stored");
+
+	printf("Flags and moving\n");
+	CHECK([imap setFlags: Mail2FlagSeen add: YES uids: [NSArray arrayWithObject: [NSNumber numberWithUnsignedInt: [row uid]]] error: &err],
+	    "STORE +FLAGS \\Seen");
+	NSDictionary *flags = [imap fetchFlagsFrom: 1 error: &err];
+	CHECK(([[flags objectForKey: [NSNumber numberWithUnsignedInt: [row uid]]] intValue] & Mail2FlagSeen) &&
+	    !([[flags objectForKey: [NSNumber numberWithUnsignedInt: [sent uid]]] intValue] & Mail2FlagSeen), "FETCH FLAGS: %@", flags);
+	CHECK([imap moveUids: [NSArray arrayWithObject: [NSNumber numberWithUnsignedInt: [row uid]]] to: @"Archive" error: &err],
+	    "moved to Archive (%@) %@", [imap hasCapability: @"MOVE"] ? @"MOVE" : @"COPY+EXPUNGE", err ? err : @"");
+	CHECK([imap select: @"INBOX" uidValidity: NULL uidNext: NULL exists: &exists error: &err] && exists == 1, "INBOX has 1 left");
+	CHECK([imap select: @"Archive" uidValidity: NULL uidNext: NULL exists: &exists error: &err] && exists == 1, "Archive has 1");
+	NSArray *au = [imap uidsAbove: 0 error: &err];
+	CHECK([imap expungeUids: au error: &err] && [imap select: @"Archive" uidValidity: NULL uidNext: NULL exists: &exists error: &err] &&
+	    exists == 0, "expunged for good");
+	[store removeMessage: [row rowid]];
+	CHECK(![[NSFileManager defaultManager] fileExistsAtPath: path2], "removing the row removes the file");
+
+	printf("IDLE\n");
+	if (![imap hasCapability: @"IDLE"])
+		printf("  skip  the server has no IDLE\n");
+	else {
+		Mail2IMAP *idler = [[Mail2IMAP alloc] initWithAccount: a1];
+		CHECK([idler connect: &err] && [idler select: @"INBOX" uidValidity: NULL uidNext: NULL exists: NULL error: &err], "second connection");
+		int p[2];
+		pipe(p);
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_global_queue(0, 0), ^{
+			NSString *e2 = nil;
+			NSData *r2 = Mail2BuildMessage(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, @"ping", @"new mail", nil, nil);
+			Mail2SendMessage(a2, r2, [NSArray arrayWithObject: @"test1@localhost"], &e2);
+		});
+		NSDate *t0 = [NSDate date];
+		int r = [idler idleWithWakeFd: p[0] timeout: 30 error: &err];
+		double dt = -[t0 timeIntervalSinceNow];
+		CHECK(r == 1 && dt > 1.5 && dt < 15, "IDLE woke %.1f s after it started, on new mail", dt);
+		t0 = [NSDate date];
+		write(p[1], "x", 1);
+		r = [idler idleWithWakeFd: p[0] timeout: 30 error: &err];
+		CHECK(r == 0 && -[t0 timeIntervalSinceNow] < 5, "a wakeup ends IDLE without reporting a change");
+		[idler release];
+	}
+
+	printf("Session\n");
+	[store clearMailbox: [inbox mbid]];
+	Mail2Session *sess = [[Mail2Session alloc] initWithAccount: a1];
+	__block int changes = 0;
+	[[NSNotificationCenter defaultCenter] addObserverForName: Mail2MessagesChanged object: sess queue: nil
+	    usingBlock: ^(NSNotification *n) { changes++; }];
+	[sess start];
+	BOOL synced = wait_for(^BOOL { return ![sess isBusy] && changes > 0 &&
+	    [[store messagesInMailbox: [inbox mbid] limit: 100] count] >= 2; }, 30);
+	NSArray *srows = [store messagesInMailbox: [inbox mbid] limit: 100];
+	CHECK(synced, "start: synced the Inbox, %lu messages, error %@", (unsigned long)[srows count], [sess lastError]);
+	BOOL snippets = wait_for(^BOOL {
+		NSEnumerator *se = [[store messagesInMailbox: [inbox mbid] limit: 100] objectEnumerator];
+		Mail2MessageInfo *x;
+		while ((x = [se nextObject]) != nil)
+			if ([x file] == nil) return NO;
+		return YES;
+	}, 20);
+	CHECK(snippets, "bodies prefetched with snippets: \"%@\"", [[srows lastObject] snippet]);
+	[sess setFlag: Mail2FlagSeen on: YES forMessages: srows];
+	CHECK([store unreadInMailbox: [inbox mbid]] == 0, "marked read locally at once");
+	wait_for(^BOOL { return ![sess isBusy]; }, 15);
+	flags = nil;
+	[imap select: @"INBOX" uidValidity: NULL uidNext: NULL exists: NULL error: &err];
+	flags = [imap fetchFlagsFrom: 1 error: &err];
+	BOOL allSeen = [flags count] > 0;
+	e = [flags objectEnumerator];
+	NSNumber *f;
+	while ((f = [e nextObject]) != nil)
+		allSeen = allSeen && ([f intValue] & Mail2FlagSeen);
+	CHECK(allSeen, "and on the server: %@", flags);
+	/* new mail through IDLE reaches the store without any action */
+	unsigned before = (unsigned)[[store messagesInMailbox: [inbox mbid] limit: 100] count];
+	NSData *r3 = Mail2BuildMessage(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, @"pushed", @"via IDLE", nil, nil);
+	Mail2SendMessage(a2, r3, [NSArray arrayWithObject: @"test1@localhost"], &err);
+	BOOL pushed = wait_for(^BOOL { return [[store messagesInMailbox: [inbox mbid] limit: 100] count] == before + 1; }, 20);
+	CHECK(pushed, "new mail arrived through IDLE without a check");
+	[sess moveMessages: [NSArray arrayWithObject: [[store messagesInMailbox: [inbox mbid] limit: 1] objectAtIndex: 0]] toSpecial: @"trash"];
+	CHECK([[store messagesInMailbox: [inbox mbid] limit: 100] count] == before, "moved to Trash locally at once");
+	wait_for(^BOOL { return ![sess isBusy]; }, 15);
+	Mail2Mailbox *trash = [sess mailboxWithSpecial: @"trash"];
+	CHECK([[store messagesInMailbox: [trash mbid] limit: 100] count] == 1, "and the Trash synced with it (%@)", [sess lastError]);
+	[sess stop];
+
+	printf("Attachments\n");
+	{
+		const char bin[] = { 'P', 'D', 'F', 0, 1, 2, (char)0xff };
+		NSArray *files = [NSArray arrayWithObjects:
+		    [[[Mail2Attachment alloc] initWithName: @"report.pdf" type: nil data: [NSData dataWithBytes: bin length: sizeof(bin)]] autorelease],
+		    [[[Mail2Attachment alloc] initWithName: @"résumé.txt" type: @"text/plain"
+		        data: [@"plain file" dataUsingEncoding: NSUTF8StringEncoding]] autorelease], nil];
+		NSData *raw = Mail2BuildMessageEx(@"Test <test2@localhost>", [NSArray arrayWithObject: @"test1@localhost"], nil,
+		    [NSArray arrayWithObject: @"Hidden One <hidden@localhost>"], @"with files", @"see attached", nil, nil, files,
+		    @"<fixed-1@localhost>");
+		Mail2ParsedMessage *pm = [Mail2ParsedMessage parseData: raw preferPlainText: YES];
+		NSArray *got = [pm attachments];
+		CHECK([got count] == 2 && [[[got objectAtIndex: 0] filename] isEqualToString: @"report.pdf"] &&
+		    [[[got objectAtIndex: 0] data] isEqualToData: [NSData dataWithBytes: bin length: sizeof(bin)]] &&
+		    [[[got objectAtIndex: 0] mimeType] isEqualToString: @"application/pdf"],
+		    "binary attachment round trip (%lu parts)", (unsigned long)[got count]);
+		CHECK([got count] == 2 && [[[got objectAtIndex: 1] filename] isEqualToString: @"résumé.txt"], "non-ASCII file name: %@",
+		    [got count] > 1 ? [[got objectAtIndex: 1] filename] : @"-");
+		CHECK([[pm body] hasPrefix: @"see attached"], "the text part is the body");
+		CHECK([[pm messageId] isEqualToString: @"<fixed-1@localhost>"], "given Message-ID: %@", [pm messageId]);
+		CHECK([[pm bcc] rangeOfString: @"hidden@localhost"].location != NSNotFound, "draft Bcc header: %@", [pm bcc]);
+		NSData *sent = Mail2BuildMessageEx(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, nil,
+		    @"s", @"b", nil, nil, files, nil);
+		CHECK([[[NSString alloc] initWithData: sent encoding: NSISOLatin1StringEncoding] rangeOfString: @"hidden"].location == NSNotFound &&
+		    [[Mail2ParsedMessage parseData: sent preferPlainText: YES] messageId] != nil, "a sent message gets its own Message-ID and no Bcc");
+	}
+
+	printf("Conversations, search, older mail\n");
+	{
+		Mail2Session *s2 = [[Mail2Session alloc] initWithAccount: a1];
+		[store clearMailbox: [inbox mbid]];
+		/* A, B replying to A, C replying to B, and an unrelated D */
+		struct { NSString *mid, *irt, *refs, *subject, *body; } t[] = {
+			{ @"<thr-a@localhost>", nil, nil, @"Trip plans", @"Shall we go? zebracorn" },
+			{ @"<thr-b@localhost>", @"<thr-a@localhost>", @"<thr-a@localhost>", @"Re: Trip plans", @"Yes" },
+			{ @"<thr-c@localhost>", @"<thr-b@localhost>", @"<thr-a@localhost> <thr-b@localhost>", @"Re: Trip plans", @"Great" },
+			{ @"<other-d@localhost>", nil, nil, @"Invoice quokka", @"Unrelated" },
+		};
+		unsigned k;
+		for (k = 0; k < 4; k++) {
+			NSData *r = Mail2BuildMessageEx(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, nil,
+			    t[k].subject, t[k].body, t[k].irt, t[k].refs ? [t[k].refs componentsSeparatedByString: @" "] : nil, nil, t[k].mid);
+			Mail2SendMessage(a2, r, [NSArray arrayWithObject: @"test1@localhost"], &err);
+		}
+		BOOL arrived = wait_for(^BOOL {
+			NSString *e3 = nil;
+			unsigned ex = 0;
+			return [imap select: @"INBOX" uidValidity: NULL uidNext: NULL exists: &ex error: &e3] && ex >= 5;
+		}, 15);
+		[s2 refreshMailboxes];
+		[s2 syncMailbox: inbox];
+		wait_for(^BOOL { return ![s2 isBusy]; }, 30);
+		NSArray *all = [store messagesInMailbox: [inbox mbid] limit: 100];
+		NSArray *conv = [store conversationsInMailbox: [inbox mbid] limit: 100];
+		Mail2MessageInfo *head = nil, *x;
+		NSEnumerator *ce = [conv objectEnumerator];
+		while ((x = [ce nextObject]) != nil)
+			if ([[x thread] isEqualToString: @"<thr-a@localhost>"])
+				head = x;
+		CHECK(arrived && [all count] >= 5, "synced %lu messages", (unsigned long)[all count]);
+		CHECK(head != nil && [head threadCount] == 3 && [[head messageId] isEqualToString: @"<thr-c@localhost>"],
+		    "A, B and C are one conversation of 3, newest first (%d, %@)", [head threadCount], [head messageId]);
+		CHECK([conv count] == [all count] - 2, "%lu conversation rows for %lu messages", (unsigned long)[conv count], (unsigned long)[all count]);
+		CHECK([[store messagesInConversation: [head thread] mailbox: [inbox mbid]] count] == 3, "its messages");
+		NSArray *hits = [store searchMailbox: [inbox mbid] text: @"quokka" alsoUids: nil limit: 50];
+		CHECK([hits count] == 1 && [[[hits objectAtIndex: 0] subject] isEqualToString: @"Invoice quokka"], "local search by subject");
+		BOOL bodies = wait_for(^BOOL { return [[store searchMailbox: [inbox mbid] text: @"zebrac" alsoUids: nil limit: 50] count] == 1; }, 15);
+		CHECK(bodies, "local search of downloaded bodies (word prefix)");
+		CHECK([[store searchMailbox: [inbox mbid] text: @"100%_\"'*" alsoUids: nil limit: 50] count] == 0, "search text with SQL and FTS syntax is harmless");
+		__block NSArray *srv = nil;
+		__block BOOL srvDone = NO;
+		[s2 searchServer: @"zebracorn" inMailbox: inbox completion: ^(NSArray *u, NSString *e4) { srv = [u retain]; srvDone = YES; }];
+		wait_for(^BOOL { return srvDone; }, 15);
+		CHECK([srv count] == 1, "server search (UID SEARCH TEXT): %@", srv);
+
+		/* older mail: keep only the newest row, then fetch what came before it, 2 at a time */
+		Mail2MessageInfo *newest = [all objectAtIndex: 0];
+		NSUInteger total = [all count];
+		[store clearMailbox: [inbox mbid]];
+		[imap select: @"INBOX" uidValidity: NULL uidNext: NULL exists: NULL error: &err];
+		[store addMessages: [imap fetchHeaders: [NSArray arrayWithObject: [NSNumber numberWithUnsignedInt: [newest uid]]] mailbox: [inbox mbid] error: &err]];
+		CHECK([[store messagesInMailbox: [inbox mbid] limit: 100] count] == 1, "one message left here");
+		__block int got = -1, rounds = 0;
+		while ([s2 hasOlderMessagesIn: inbox] && rounds < 10) {
+			got = -1;
+			[s2 loadOlderMessagesIn: inbox count: 2 completion: ^(int n) { got = n; }];
+			wait_for(^BOOL { return got >= 0; }, 15);
+			rounds++;
+		}
+		CHECK([[store messagesInMailbox: [inbox mbid] limit: 100] count] == total && ![s2 hasOlderMessagesIn: inbox],
+		    "older messages fetched back, 2 at a time, in %d rounds: %lu of %lu", rounds,
+		    (unsigned long)[[store messagesInMailbox: [inbox mbid] limit: 100] count], (unsigned long)total);
+
+		printf("Drafts\n");
+		NSData *d1 = Mail2BuildMessageEx(@"test1@localhost", [NSArray arrayWithObject: @"someone@localhost"], nil, nil,
+		    @"draft v1", @"first", nil, nil, nil, @"<draft-1@localhost>");
+		NSData *d2 = Mail2BuildMessageEx(@"test1@localhost", [NSArray arrayWithObject: @"someone@localhost"], nil, nil,
+		    @"draft v2", @"second", nil, nil, nil, @"<draft-2@localhost>");
+		__block BOOL saved = NO;
+		__block NSString *serr = nil;
+		[s2 saveDraft: d1 replacing: nil completion: ^(NSString *e5) { serr = [e5 retain]; saved = YES; }];
+		wait_for(^BOOL { return saved && ![s2 isBusy]; }, 20);
+		Mail2Mailbox *drafts = [s2 mailboxWithSpecial: @"drafts"];
+		NSArray *dl = drafts ? [store messagesInMailbox: [drafts mbid] limit: 10] : nil;
+		CHECK(serr == nil && [dl count] == 1 && [[dl objectAtIndex: 0] isDraft], "saved to Drafts (made on the server: %@) %@",
+		    [drafts name], serr ? serr : @"");
+		saved = NO;
+		[s2 saveDraft: d2 replacing: @"<draft-1@localhost>" completion: ^(NSString *e5) { saved = YES; }];
+		wait_for(^BOOL { return saved && ![s2 isBusy]; }, 20);
+		dl = drafts ? [store messagesInMailbox: [drafts mbid] limit: 10] : nil;
+		CHECK([dl count] == 1 && [[[dl objectAtIndex: 0] subject] isEqualToString: @"draft v2"], "saving again replaces it (%lu)",
+		    (unsigned long)[dl count]);
+		[s2 deleteDraft: @"<draft-2@localhost>"];
+		wait_for(^BOOL { return ![s2 isBusy]; }, 20);
+		unsigned dex = 99;
+		[imap select: [drafts name] uidValidity: NULL uidNext: NULL exists: &dex error: &err];
+		CHECK(drafts && [[store messagesInMailbox: [drafts mbid] limit: 10] count] == 0 && dex == 0, "sent: the draft is removed");
+		[s2 release];
+	}
+
+	printf("\n%d checks, %d failed\n", checks, failures);
+	[pool release];
+	return failures ? 1 : 0;
+}

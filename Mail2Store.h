@@ -1,0 +1,126 @@
+/* Mail2Store: the local copy of each account. An SQLite index (~/GNUstep/Library/Mail2/Index.sqlite) has a row per
+ * mailbox and per message (envelope, flags, snippet); the messages themselves, once downloaded, are files in a Maildir
+ * per mailbox (~/GNUstep/Library/Mail2/Mail/<account>/<mailbox>/{cur,new,tmp}), named
+ * <uidvalidity>_<uid>.mail2:2,<flags> so their Maildir flags stay in step with the row. The row holds the file name.
+ *
+ * Safe to call from any thread (one connection, serialised by a lock). */
+#import <Foundation/Foundation.h>
+
+enum {
+	Mail2FlagSeen = 1,
+	Mail2FlagAnswered = 2,
+	Mail2FlagFlagged = 4,
+	Mail2FlagDeleted = 8,
+	Mail2FlagDraft = 16,
+};
+
+@interface Mail2Mailbox : NSObject
+{
+@public
+	long long mbid;
+	NSString *account, *name, *displayName, *special;
+	char delimiter;
+	BOOL selectable;
+	unsigned uidValidity, uidNext;
+	int unread, depth;
+}
+- (long long) mbid;
+- (NSString *) account;
+- (NSString *) name;		/* the IMAP name (modified UTF-7), for commands */
+- (NSString *) displayName;	/* the last path component, decoded; "Inbox" for INBOX */
+- (NSString *) special;		/* inbox, drafts, sent, archive, junk, trash, all, flagged; or nil */
+- (BOOL) selectable;
+- (int) unread;
+- (int) depth;			/* nesting level below its account */
+@end
+
+@interface Mail2MessageInfo : NSObject
+{
+@public
+	long long rowid, mbid;
+	unsigned uid;
+	int flags;
+	NSDate *date;
+	NSString *fromName, *fromAddr, *to, *cc, *replyTo, *subject, *messageId, *inReplyTo, *references, *snippet, *file;
+	NSString *thread;
+	unsigned long long size;
+	BOOL attachment;
+	int threadCount, threadUnread;
+}
+- (long long) rowid;
+- (long long) mbid;
+- (unsigned) uid;
+- (int) flags;
+- (BOOL) isUnread;
+- (NSDate *) date;
+- (NSString *) fromName;
+- (NSString *) fromAddr;
+- (NSString *) sender;		/* the name, else the address */
+- (NSString *) to;		/* "Name <addr>, ..." */
+- (NSString *) cc;
+- (NSString *) replyTo;
+- (NSString *) subject;
+- (NSString *) messageId;
+- (NSString *) inReplyTo;
+- (NSString *) snippet;
+- (NSString *) file;		/* the Maildir file's name, nil until downloaded */
+- (unsigned long long) size;
+- (BOOL) hasAttachment;
+- (NSString *) references;	/* "<id> <id> ..." */
+- (NSString *) thread;		/* the conversation key */
+- (int) threadCount;		/* in a conversation list: the messages in it here (1 otherwise) */
+- (int) threadUnread;		/* and how many of them are unread */
+- (BOOL) isDraft;
+@end
+
+@interface Mail2Store : NSObject
+{
+	void *db;	/* sqlite3 * */
+	NSRecursiveLock *lock;
+}
++ (Mail2Store *) sharedStore;
+
+/* ---- mailboxes ---- */
+/* sorted: Inbox, Drafts, Sent, Archive, Junk, Trash, then the rest by path; with unread counts */
+- (NSArray *) mailboxesForAccount: (NSString *)account;
+- (Mail2Mailbox *) mailboxWithID: (long long)mbid;
+/* the account's mailboxes as the server lists them now: dictionaries {Name, Delimiter, Special, Selectable}; mailboxes no
+ * longer listed are removed with their messages and files */
+- (void) setMailboxes: (NSArray *)list forAccount: (NSString *)account;
+- (void) setUidValidity: (unsigned)v uidNext: (unsigned)n forMailbox: (long long)mbid;
+/* removes every message (rows and files); for a UIDVALIDITY change */
+- (void) clearMailbox: (long long)mbid;
+- (void) removeAccount: (NSString *)account;
+
+/* ---- messages ---- */
+- (NSArray *) messagesInMailbox: (long long)mbid limit: (int)limit;	/* newest first */
+/* the newest message of each conversation, newest first, with -threadCount and -threadUnread */
+- (NSArray *) conversationsInMailbox: (long long)mbid limit: (int)limit;
+- (NSArray *) messagesInConversation: (NSString *)thread mailbox: (long long)mbid;	/* newest first */
+/* messages whose sender, recipients, subject, opening or (downloaded) body has the text, or whose UID is in uids (the
+ * server's matches), newest first */
+- (NSArray *) searchMailbox: (long long)mbid text: (NSString *)text alsoUids: (NSArray *)uids limit: (int)limit;
+- (Mail2MessageInfo *) messageWithRowID: (long long)rowid;
+- (unsigned) maxUidInMailbox: (long long)mbid;
+- (unsigned) minUidInMailbox: (long long)mbid;
+- (NSDictionary *) flagsByUidInMailbox: (long long)mbid;	/* NSNumber uid -> NSNumber flags */
+/* inserts new rows and refreshes the flags and envelope of known ones (their file and snippet are kept) */
+- (void) addMessages: (NSArray *)infos;
+- (void) setFlags: (int)flags forMessage: (long long)rowid;
+- (void) setFlags: (int)flags forUid: (unsigned)uid inMailbox: (long long)mbid;
+- (void) removeUids: (NSArray *)uids inMailbox: (long long)mbid;
+- (void) removeMessage: (long long)rowid;
+- (int) unreadInMailbox: (long long)mbid;
+- (int) unreadInInboxes;	/* every account's Inbox: the dock badge */
+/* the newest messages without a file, for prefetching */
+- (NSArray *) messagesToPrefetchInMailbox: (long long)mbid limit: (int)limit maxSize: (unsigned long long)maxSize;
+
+/* ---- files ---- */
+/* writes the raw message into the mailbox's Maildir (tmp, then renamed into cur) and records it with its snippet */
+- (BOOL) storeMessageData: (NSData *)raw forMessage: (Mail2MessageInfo *)m snippet: (NSString *)snippet attachment: (BOOL)att;
+/* and indexes the body text for search */
+- (BOOL) storeMessageData: (NSData *)raw forMessage: (Mail2MessageInfo *)m snippet: (NSString *)snippet attachment: (BOOL)att
+                     body: (NSString *)body;
+/* the full path of a downloaded message, or nil */
+- (NSString *) pathForMessage: (Mail2MessageInfo *)m;
+@end

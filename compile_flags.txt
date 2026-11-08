@@ -1,0 +1,9 @@
+-fblocks
+-isysroot
+/Applications/Xcode-12.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk
+--target=arm64-apple-ios14.4
+-DGNUSTEP
+-I../iokit/tools/userland_staging/libc_build/gnustep/root/usr/GNUstep/System/Library/Headers
+-I../iokit/tools/userland_staging/libc_build/objc4_public_headers
+-I../iokit/tools/userland_staging/libc_build/media/include
+-I../iokit/tools/userland_staging/libc_build/xml2_headers

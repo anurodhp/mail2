@@ -1,0 +1,17 @@
+{
+	NSTypes = (
+		{
+			NSName = "Mail Message";
+			NSHumanReadableName = "Mail Message";
+			NSRole = Viewer;
+			NSIcon = "Mail2.png";
+			NSUnixExtensions = ( eml );
+		}
+	);
+	CFBundleURLTypes = (
+		{
+			CFBundleURLName = "Email Address";
+			CFBundleURLSchemes = ( mailto );
+		}
+	);
+}
