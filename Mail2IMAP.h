@@ -24,6 +24,13 @@
 /* every mailbox: dictionaries {Name, Delimiter, Special, Selectable} as Mail2Store -setMailboxes:forAccount: takes */
 - (NSArray *) listMailboxes: (NSString **)err;
 - (BOOL) select: (NSString *)mailbox uidValidity: (unsigned *)v uidNext: (unsigned *)n exists: (unsigned *)exists error: (NSString **)err;
+/* SELECT with CONDSTORE when the server has it: *modseq gets the mailbox's HIGHESTMODSEQ (0 without CONDSTORE) */
+- (BOOL) select: (NSString *)mailbox uidValidity: (unsigned *)v uidNext: (unsigned *)n exists: (unsigned *)exists
+          modseq: (unsigned long long *)modseq error: (NSString **)err;
+/* flags of the messages from uid up that changed since modseq (CONDSTORE's CHANGEDSINCE): uid -> flags */
+- (NSDictionary *) fetchFlagsFrom: (unsigned)uid changedSince: (unsigned long long)modseq error: (NSString **)err;
+/* STATUS: {UIDNEXT, MESSAGES, UIDVALIDITY} as NSNumbers, without selecting it */
+- (NSDictionary *) statusOf: (NSString *)mailbox error: (NSString **)err;
 /* UIDs (NSNumber) of the messages that arrived on or after the date */
 - (NSArray *) uidsSince: (NSDate *)date error: (NSString **)err;
 /* UIDs above uid (UID SEARCH UID uid+1:*, which on an empty range still names the last message: filtered) */

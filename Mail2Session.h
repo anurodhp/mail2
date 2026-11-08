@@ -42,6 +42,8 @@ extern NSString *const Mail2StatusChanged;
 - (void) syncMailbox: (Mail2Mailbox *)mb;
 - (void) checkAll;	/* the Inbox and the given mailbox (the one shown), from the toolbar's Get Mail */
 - (void) checkInboxAnd: (Mail2Mailbox *)mb;
+/* every other folder by STATUS, syncing the ones that changed (every 2 minutes, and Get Mail) */
+- (void) watchFolders;
 
 /* downloads the message into its Maildir; the completion runs on the main thread with nil or an error */
 - (void) fetchMessage: (Mail2MessageInfo *)m completion: (void (^)(NSString *err))done;

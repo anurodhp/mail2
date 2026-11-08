@@ -10,6 +10,7 @@
 #include <libetpan/uidplus.h>
 #include <libetpan/mailimap_oauth2.h>
 #include <libetpan/xgmlabels.h>
+#include <libetpan/condstore.h>
 #include <libetpan/mailimf.h>
 #include <errno.h>
 #include <poll.h>
@@ -411,6 +412,98 @@ uids_from_search(clist *res)
 	if (n) *n = si ? si->sel_uidnext : 0;
 	if (exists) *exists = si ? si->sel_exists : 0;
 	return YES;
+}
+
+- (BOOL) select: (NSString *)mailbox uidValidity: (unsigned *)v uidNext: (unsigned *)n exists: (unsigned *)exists
+          modseq: (unsigned long long *)modseq error: (NSString **)err
+{
+	if (![self connect: err])
+		return NO;
+	if (modseq)
+		*modseq = 0;
+	if (!mailimap_has_condstore(IMAP))
+		return [self select: mailbox uidValidity: v uidNext: n exists: exists error: err];
+	uint64_t ms = 0;
+	int rc = mailimap_select_condstore(IMAP, [mailbox UTF8String], &ms);
+	if (rc != MAILIMAP_NO_ERROR) {
+		*err = imap_error(IMAP, rc, [NSString stringWithFormat: @"Opening %@", Mail2DecodeMailboxName([mailbox UTF8String])]);
+		[self failed: rc];
+		DESTROY(selected);
+		return NO;
+	}
+	ASSIGN(selected, mailbox);
+	struct mailimap_selection_info *si = IMAP->imap_selection_info;
+	if (v) *v = si ? si->sel_uidvalidity : 0;
+	if (n) *n = si ? si->sel_uidnext : 0;
+	if (exists) *exists = si ? si->sel_exists : 0;
+	if (modseq) *modseq = ms;
+	return YES;
+}
+
+- (NSDictionary *) fetchFlagsFrom: (unsigned)uid changedSince: (unsigned long long)modseq error: (NSString **)err
+{
+	NSMutableDictionary *r = [NSMutableDictionary dictionary];
+	struct mailimap_fetch_type *ft = mailimap_fetch_type_new_fetch_att_list_empty();
+	struct mailimap_set *set = mailimap_set_new_interval(uid ? uid : 1, 0);
+	clist *res = NULL;
+	clistiter *it;
+	mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_uid());
+	mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_flags());
+	int rc = mailimap_uid_fetch_changedsince(IMAP, set, ft, modseq, &res);
+	mailimap_set_free(set);
+	mailimap_fetch_type_free(ft);
+	if (rc != MAILIMAP_NO_ERROR) {
+		*err = imap_error(IMAP, rc, @"Fetching changed flags");
+		[self failed: rc];
+		return nil;
+	}
+	for (it = clist_begin(res); it != NULL; it = clist_next(it)) {
+		struct mailimap_msg_att *ma = clist_content(it);
+		unsigned u = 0;
+		int f = 0;
+		clistiter *ai;
+		for (ai = clist_begin(ma->att_list); ai != NULL; ai = clist_next(ai)) {
+			struct mailimap_msg_att_item *item = clist_content(ai);
+			if (item->att_type == MAILIMAP_MSG_ATT_ITEM_DYNAMIC)
+				f = flags_from_fetch(item->att_data.att_dyn);
+			else if (item->att_type == MAILIMAP_MSG_ATT_ITEM_STATIC && item->att_data.att_static->att_type == MAILIMAP_MSG_ATT_UID)
+				u = item->att_data.att_static->att_data.att_uid;
+		}
+		if (u >= uid && u != 0)
+			[r setObject: [NSNumber numberWithInt: f] forKey: [NSNumber numberWithUnsignedInt: u]];
+	}
+	mailimap_fetch_list_free(res);
+	return r;
+}
+
+- (NSDictionary *) statusOf: (NSString *)mailbox error: (NSString **)err
+{
+	if (![self connect: err])
+		return nil;
+	struct mailimap_status_att_list *atts = mailimap_status_att_list_new_empty();
+	mailimap_status_att_list_add(atts, MAILIMAP_STATUS_ATT_UIDNEXT);
+	mailimap_status_att_list_add(atts, MAILIMAP_STATUS_ATT_MESSAGES);
+	mailimap_status_att_list_add(atts, MAILIMAP_STATUS_ATT_UIDVALIDITY);
+	struct mailimap_mailbox_data_status *res = NULL;
+	int rc = mailimap_status(IMAP, [mailbox UTF8String], atts, &res);
+	mailimap_status_att_list_free(atts);
+	if (rc != MAILIMAP_NO_ERROR) {
+		*err = imap_error(IMAP, rc, @"Checking a mailbox");
+		[self failed: rc];
+		return nil;
+	}
+	NSMutableDictionary *d = [NSMutableDictionary dictionary];
+	clistiter *it;
+	for (it = res && res->st_info_list ? clist_begin(res->st_info_list) : NULL; it != NULL; it = clist_next(it)) {
+		struct mailimap_status_info *si = clist_content(it);
+		NSString *k = si->st_att == MAILIMAP_STATUS_ATT_UIDNEXT ? @"UIDNEXT" : si->st_att == MAILIMAP_STATUS_ATT_MESSAGES ? @"MESSAGES"
+		    : si->st_att == MAILIMAP_STATUS_ATT_UIDVALIDITY ? @"UIDVALIDITY" : nil;
+		if (k)
+			[d setObject: [NSNumber numberWithUnsignedInt: si->st_value] forKey: k];
+	}
+	if (res)
+		mailimap_mailbox_data_status_free(res);
+	return d;
 }
 
 - (NSArray *) search: (struct mailimap_search_key *)key what: (NSString *)what error: (NSString **)err

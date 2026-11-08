@@ -253,7 +253,7 @@ static NSString *volatile heartbeatMode;
 	NSDictionary *opts = [NSDictionary dictionaryWithObjectsAndKeys:
 	    @"Mail2", @"ApplicationName",
 	    @"A small IMAP mail client for GNUstep.", @"ApplicationDescription",
-	    @"0.8", @"ApplicationRelease",
+	    @"0.9", @"ApplicationRelease",
 	    [NSArray arrayWithObject: @"Anurodh Pokharel"], @"Authors",
 	    @"Copyright © 2026 Anurodh Pokharel. MIT license.", @"Copyright",
 	    @"Mail by libetpan 1.9.4 (BSD), SQLite 3.44 (public domain) and Mbed TLS 3.6 (Apache-2.0). Icons from Lucide (ISC).",

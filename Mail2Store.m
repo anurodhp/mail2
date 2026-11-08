@@ -257,10 +257,19 @@ special_rank(NSString *s)
 		    "PRAGMA user_version = 1;"];
 		[self exec: "COMMIT"];
 	}
+	/* version 3: the server's message count and CONDSTORE modseq per mailbox */
+	if ([self userVersion] < 3) {
+		if (![self hasColumn: "exists_count" table: "mailboxes"])
+			[self exec: "ALTER TABLE mailboxes ADD COLUMN exists_count INTEGER DEFAULT 0"];
+		if (![self hasColumn: "modseq" table: "mailboxes"])
+			[self exec: "ALTER TABLE mailboxes ADD COLUMN modseq INTEGER DEFAULT 0"];
+	}
 	/* version 2: muted conversations and blocked senders */
 	if ([self userVersion] < 2)
 		[self exec: "CREATE TABLE IF NOT EXISTS muted (thread TEXT PRIMARY KEY);"
-		    "CREATE TABLE IF NOT EXISTS blocked (address TEXT PRIMARY KEY); PRAGMA user_version = 2;"];
+		    "CREATE TABLE IF NOT EXISTS blocked (address TEXT PRIMARY KEY);"];
+	if ([self userVersion] < 3)
+		[self exec: "PRAGMA user_version = 3;"];
 	muted = [[NSMutableSet alloc] init];
 	blocked = [[NSMutableSet alloc] init];
 	sqlite3_stmt *ms = [self prepare: "SELECT thread FROM muted"];
@@ -286,8 +295,13 @@ special_rank(NSString *s)
 
 - (BOOL) hasColumn: (const char *)name
 {
+	return [self hasColumn: name table: "messages"];
+}
+
+- (BOOL) hasColumn: (const char *)name table: (const char *)table
+{
 	BOOL found = NO;
-	sqlite3_stmt *st = [self prepare: "PRAGMA table_info(messages)"];
+	sqlite3_stmt *st = [self prepare: [[NSString stringWithFormat: @"PRAGMA table_info(%s)", table] UTF8String]];
 	while (st && sqlite3_step(st) == SQLITE_ROW)
 		if (sqlite3_column_text(st, 1) && strcmp((const char *)sqlite3_column_text(st, 1), name) == 0)
 			found = YES;
@@ -325,6 +339,8 @@ special_rank(NSString *s)
 	m->uidValidity = (unsigned)sqlite3_column_int64(st, 6);
 	m->uidNext = (unsigned)sqlite3_column_int64(st, 7);
 	m->unread = sqlite3_column_int(st, 8);
+	m->exists = (unsigned)sqlite3_column_int64(st, 9);
+	m->modseq = (unsigned long long)sqlite3_column_int64(st, 10);
 	NSArray *parts = m->delimiter ? [m->name componentsSeparatedByString: [NSString stringWithFormat: @"%c", m->delimiter]]
 	                              : [NSArray arrayWithObject: m->name];
 	m->depth = (int)[parts count] - 1;
@@ -336,7 +352,7 @@ special_rank(NSString *s)
 }
 
 #define MAILBOX_COLUMNS "id, account, name, delim, special, selectable, uidvalidity, uidnext," \
-	" (SELECT COUNT(*) FROM messages WHERE mailbox = mailboxes.id AND (flags & 1) = 0)"
+	" (SELECT COUNT(*) FROM messages WHERE mailbox = mailboxes.id AND (flags & 1) = 0), exists_count, modseq"
 
 - (NSArray *) mailboxesForAccount: (NSString *)account
 {
@@ -427,6 +443,18 @@ special_rank(NSString *s)
 	sqlite3_stmt *st = [self prepare: "UPDATE mailboxes SET uidvalidity = ?, uidnext = ? WHERE id = ?"];
 	sqlite3_bind_int64(st, 1, v);
 	sqlite3_bind_int64(st, 2, n);
+	sqlite3_bind_int64(st, 3, mbid);
+	sqlite3_step(st);
+	sqlite3_finalize(st);
+	[lock unlock];
+}
+
+- (void) setExists: (unsigned)exists modseq: (unsigned long long)modseq forMailbox: (long long)mbid
+{
+	[lock lock];
+	sqlite3_stmt *st = [self prepare: "UPDATE mailboxes SET exists_count = ?, modseq = ? WHERE id = ?"];
+	sqlite3_bind_int64(st, 1, exists);
+	sqlite3_bind_int64(st, 2, (sqlite3_int64)modseq);
 	sqlite3_bind_int64(st, 3, mbid);
 	sqlite3_step(st);
 	sqlite3_finalize(st);

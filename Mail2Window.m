@@ -1009,6 +1009,7 @@ scroller_for(NSTableView *t, NSRect r)
 	while ((s = [e nextObject]) != nil) {
 		[s refreshMailboxes];
 		[s checkInboxAnd: current];
+		[s watchFolders];
 	}
 }
 

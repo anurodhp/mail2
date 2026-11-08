@@ -1063,6 +1063,33 @@ main(void)
 		[cs release];
 	}
 
+	printf("Every folder watched\n");
+	{
+		Mail2Session *ws = [[Mail2Session alloc] initWithAccount: a1];
+		[ws refreshMailboxes];
+		wait_for(^BOOL { return ![ws isBusy]; }, 20);
+		[ws createMailboxNamed: @"Watched"];
+		wait_for(^BOOL { return ![ws isBusy]; }, 20);
+		Mail2Mailbox *wb = nil, *mb;
+		NSEnumerator *me = [[store mailboxesForAccount: @"test1@localhost"] objectEnumerator];
+		while ((mb = [me nextObject]) != nil)
+			if ([[mb displayName] isEqualToString: @"Watched"])
+				wb = mb;
+		[ws syncMailbox: wb];
+		wait_for(^BOOL { return ![ws isBusy]; }, 20);
+		NSUInteger before = [[store messagesInMailbox: [wb mbid] limit: 100] count];
+		/* filed there by someone else (another program, a server rule) */
+		NSData *fm = Mail2BuildMessage(@"test2@localhost", [NSArray arrayWithObject: @"test1@localhost"], nil, @"filed elsewhere", @"x", nil, nil);
+		NSString *e5 = nil;
+		[imap appendMessage: fm to: [wb name] flags: 0 error: &e5];
+		[ws watchFolders];
+		BOOL seen = wait_for(^BOOL { return ![ws isBusy] && [[store messagesInMailbox: [wb mbid] limit: 100] count] == before + 1; }, 20);
+		CHECK(seen, "a message filed into another folder arrives without opening it (STATUS), %@", e5 ? e5 : @"");
+		Mail2Mailbox *fresh = [store mailboxWithID: [wb mbid]];
+		CHECK(fresh->exists == before + 1, "the server's count kept for the next check (%u)", fresh->exists);
+		[ws release];
+	}
+
 	printf("\n%d checks, %d failed\n", checks, failures);
 	[pool release];
 	return failures ? 1 : 0;

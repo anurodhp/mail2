@@ -20,7 +20,7 @@ NSString *const Mail2StatusChanged = @"Mail2StatusChanged";
 #define FIRST_SYNC_MAX 500	/* at most this many messages on a mailbox's first sync */
 #define PREFETCH_COUNT 25	/* bodies downloaded after a sync, newest first, for snippets and quick reading */
 #define PREFETCH_MAX_SIZE (512 * 1024)
-#define CHECK_INTERVAL 300.0
+#define CHECK_INTERVAL 120.0	/* the Inbox again, and every other folder by STATUS */
 #define IDLE_TIMEOUT (25 * 60)
 
 void
@@ -185,7 +185,8 @@ Mail2ClearDockBadge(void)
 
 	if (![mb selectable])
 		return YES;
-	if (![imap select: [mb name] uidValidity: &validity uidNext: &next exists: &exists error: err])
+	unsigned long long modseq = 0;
+	if (![imap select: [mb name] uidValidity: &validity uidNext: &next exists: &exists modseq: &modseq error: err])
 		return NO;
 	if (mb->uidValidity != 0 && validity != mb->uidValidity) {
 		/* the server renumbered the mailbox: everything we have is stale */
@@ -230,7 +231,41 @@ Mail2ClearDockBadge(void)
 
 	/* flags of what we already had, and what has gone */
 	unsigned minKnown = [store minUidInMailbox: mbid];
-	if (maxKnown > 0 && minKnown > 0) {
+	if (maxKnown > 0 && minKnown > 0 && modseq > 0 && mb->modseq > 0) {
+		/* CONDSTORE: only what changed since the last sync; deletions from the UID list alone */
+		if (modseq != mb->modseq) {
+			NSDictionary *changedFlags = [imap fetchFlagsFrom: minKnown changedSince: mb->modseq error: err];
+			if (changedFlags == nil)
+				return NO;
+			NSDictionary *local = [store flagsByUidInMailbox: mbid];
+			NSEnumerator *ce = [changedFlags keyEnumerator];
+			NSNumber *u;
+			BOOL changed = NO;
+			while ((u = [ce nextObject]) != nil)
+				if ([local objectForKey: u] && ![[local objectForKey: u] isEqual: [changedFlags objectForKey: u]]) {
+					[store setFlags: [[changedFlags objectForKey: u] intValue] forUid: [u unsignedIntValue] inMailbox: mbid];
+					changed = YES;
+				}
+			if (changed)
+				[self postMessagesChanged: mbid];
+		}
+		if (exists != mb->exists || modseq != mb->modseq) {
+			NSArray *present = exists ? [imap uidsAbove: minKnown - 1 error: err] : [NSArray array];
+			if (present == nil)
+				return NO;
+			NSSet *have = [NSSet setWithArray: present];
+			NSMutableArray *gone = [NSMutableArray array];
+			NSEnumerator *le = [[store flagsByUidInMailbox: mbid] keyEnumerator];
+			NSNumber *u;
+			while ((u = [le nextObject]) != nil)
+				if ([u unsignedIntValue] <= maxKnown && ![have containsObject: u])
+					[gone addObject: u];
+			if ([gone count]) {
+				[store removeUids: gone inMailbox: mbid];
+				[self postMessagesChanged: mbid];
+			}
+		}
+	} else if (maxKnown > 0 && minKnown > 0) {
 		NSDictionary *server = exists ? [imap fetchFlagsFrom: minKnown error: err] : [NSDictionary dictionary];
 		if (server == nil)
 			return NO;
@@ -255,6 +290,9 @@ Mail2ClearDockBadge(void)
 			[self postMessagesChanged: mbid];
 	}
 	[store setUidValidity: validity uidNext: next forMailbox: mbid];
+	[store setExists: exists modseq: modseq forMailbox: mbid];
+	mb->exists = exists;
+	mb->modseq = modseq;
 
 	/* bodies of the newest messages, for their snippets */
 	NSEnumerator *pe = [[store messagesToPrefetchInMailbox: mbid limit: PREFETCH_COUNT maxSize: PREFETCH_MAX_SIZE] objectEnumerator];
@@ -329,11 +367,46 @@ Mail2ClearDockBadge(void)
 {
 	[self refreshMailboxes];
 	[self checkInboxAnd: nil];
+	[self watchFolders];
+}
+
+/* every folder but the Inbox (IDLE watches that): STATUS each one synced before, and sync the ones whose UIDNEXT,
+ * message count or UIDVALIDITY moved */
+- (BOOL) q_watchFolders: (NSString **)err
+{
+	NSEnumerator *e = [[[Mail2Store sharedStore] mailboxesForAccount: [account identifier]] objectEnumerator];
+	Mail2Mailbox *mb;
+	while ((mb = [e nextObject]) != nil) {
+		if (![mb selectable] || [[mb special] isEqualToString: @"inbox"] || mb->uidValidity == 0)
+			continue;
+		NSDictionary *st = [imap statusOf: [mb name] error: err];
+		if (st == nil) {
+			if (![imap isConnected])
+				return NO;
+			*err = nil;	/* a mailbox gone meanwhile: the next mailbox list drops it */
+			continue;
+		}
+		if ([[st objectForKey: @"UIDNEXT"] unsignedIntValue] != mb->uidNext ||
+		    [[st objectForKey: @"MESSAGES"] unsignedIntValue] != mb->exists ||
+		    [[st objectForKey: @"UIDVALIDITY"] unsignedIntValue] != mb->uidValidity) {
+			if (Mail2Debug())
+				NSLog(@"Mail2: %@ changed on the server: syncing it", [mb displayName]);
+			if (![self q_sync: mb error: err])
+				return NO;
+		}
+	}
+	return YES;
+}
+
+- (void) watchFolders
+{
+	[self run: nil work: ^BOOL (NSString **err) { return [self q_watchFolders: err]; }];
 }
 
 - (void) timerFired: (NSTimer *)t
 {
 	[self checkInboxAnd: nil];
+	[self watchFolders];
 }
 
 - (void) start

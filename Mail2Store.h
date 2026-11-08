@@ -36,7 +36,8 @@ enum {
 	NSString *account, *name, *displayName, *special;
 	char delimiter;
 	BOOL selectable;
-	unsigned uidValidity, uidNext;
+	unsigned uidValidity, uidNext, exists;
+	unsigned long long modseq;	/* CONDSTORE's HIGHESTMODSEQ at the last sync, 0 if none */
 	int unread, depth;
 }
 - (long long) mbid;
@@ -113,6 +114,8 @@ enum {
  * longer listed are removed with their messages and files */
 - (void) setMailboxes: (NSArray *)list forAccount: (NSString *)account;
 - (void) setUidValidity: (unsigned)v uidNext: (unsigned)n forMailbox: (long long)mbid;
+/* what the server said at the last sync: its message count and CONDSTORE modseq (folder watching, fast resync) */
+- (void) setExists: (unsigned)exists modseq: (unsigned long long)modseq forMailbox: (long long)mbid;
 /* removes every message (rows and files); for a UIDVALIDITY change */
 - (void) clearMailbox: (long long)mbid;
 - (void) removeAccount: (NSString *)account;
