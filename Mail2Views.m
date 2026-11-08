@@ -47,6 +47,21 @@ Mail2WebViewClass(void)
 + (BOOL) startEngineWithDirectory: (NSString *)dir;
 - (void) setDelegate: (id)d;
 - (void) loadHTMLString: (NSString *)html;
+- (void) setAllowsRemoteContent: (BOOL)yes;
+@end
+
+
+/* the strip over an HTML message whose remote content was held back */
+@interface Mail2RemoteBar : NSView
+@end
+@implementation Mail2RemoteBar
+- (void) drawRect: (NSRect)r
+{
+	[[NSColor colorWithCalibratedRed: 1.0 green: 0.97 blue: 0.85 alpha: 1] set];
+	NSRectFill([self bounds]);
+	[[NSColor colorWithCalibratedRed: 0.90 green: 0.84 blue: 0.62 alpha: 1] set];
+	NSRectFill(NSMakeRect(0, 0, NSWidth([self bounds]), 1));
+}
 @end
 
 NSImage *
@@ -166,7 +181,7 @@ static NSString *
 mailbox_icon(Mail2Mailbox *m)
 {
 	NSString *s = [m special];
-	if ([s isEqualToString: @"inbox"]) return @"sb-inbox";
+	if ([s isEqualToString: @"inbox"] || [s isEqualToString: @"allinboxes"]) return @"sb-inbox";
 	if ([s isEqualToString: @"drafts"]) return @"sb-drafts";
 	if ([s isEqualToString: @"sent"]) return @"sb-sent";
 	if ([s isEqualToString: @"archive"] || [s isEqualToString: @"all"]) return @"sb-archive";
@@ -455,7 +470,7 @@ initials(NSString *name)
 - (void) dealloc
 {
 	[header release]; [attachBar release]; [scroll release]; [text release]; [empty release];
-	[msg release]; [attachments release]; [web release]; [inlineParts release];
+	[msg release]; [attachments release]; [web release]; [inlineParts release]; [remoteBar release];
 	[super dealloc];
 }
 
@@ -476,6 +491,8 @@ initials(NSString *name)
 	[attachBar setHidden: YES];
 	[scroll setHidden: YES];
 	[web setHidden: YES];
+	[remoteBar setHidden: YES];
+	remoteBlocked = NO;
 	[empty setStringValue: why ? why : @""];
 	[empty setHidden: NO];
 	[self setNeedsDisplay: YES];
@@ -530,7 +547,44 @@ initials(NSString *name)
 	[header setFrame: NSMakeRect(0, 0, NSWidth(b), hh)];
 	[attachBar setFrame: NSMakeRect(0, hh, NSWidth(b), h)];
 	[scroll setFrame: NSMakeRect(0, hh + h, NSWidth(b), NSHeight(b) - hh - h)];
-	[web setFrame: [scroll frame]];
+	CGFloat rb = remoteBlocked ? 32 : 0;
+	[remoteBar setFrame: NSMakeRect(0, hh + h, NSWidth(b), rb)];
+	[web setFrame: NSMakeRect(0, hh + h + rb, NSWidth(b), NSHeight(b) - hh - h - rb)];
+}
+
+- (void) makeRemoteBar
+{
+	if (remoteBar != nil)
+		return;
+	remoteBar = [[Mail2RemoteBar alloc] initWithFrame: NSMakeRect(0, 0, NSWidth([self bounds]), 32)];
+	[remoteBar setAutoresizingMask: NSViewWidthSizable];
+	NSTextField *l = [[[NSTextField alloc] initWithFrame: NSMakeRect(14, 7, NSWidth([self bounds]) - 200, 18)] autorelease];
+	[l setStringValue: @"Remote content was not loaded, so the sender cannot tell you opened this."];
+	[l setEditable: NO];
+	[l setSelectable: NO];
+	[l setBezeled: NO];
+	[l setDrawsBackground: NO];
+	[l setFont: [NSFont systemFontOfSize: 11]];
+	[l setAutoresizingMask: NSViewWidthSizable];
+	[remoteBar addSubview: l];
+	NSButton *b = [[[NSButton alloc] initWithFrame: NSMakeRect(NSWidth([self bounds]) - 178, 3, 166, 26)] autorelease];
+	[b setTitle: @"Load Remote Content"];
+	[b setBezelStyle: NSRoundedBezelStyle];
+	[b setFont: [NSFont systemFontOfSize: 11]];
+	[b setTarget: self];
+	[b setAction: @selector(loadRemoteContent:)];
+	[b setAutoresizingMask: NSViewMinXMargin];
+	[remoteBar addSubview: b];
+	[self addSubview: remoteBar];
+}
+
+/* this message's images and styles from the web, through Florence's tracker list (FloWebView) */
+- (void) loadRemoteContent: (id)sender
+{
+	remoteBlocked = NO;
+	[remoteBar setHidden: YES];
+	[self layoutAttachments];
+	[web setAllowsRemoteContent: YES];
 }
 
 - (void) showMessage: (Mail2MessageInfo *)m body: (NSString *)body attachments: (NSArray *)att
@@ -582,6 +636,13 @@ initials(NSString *name)
 		ASSIGN(attachments, att);
 		ASSIGN(inlineParts, parts);
 		[(Mail2HeaderView *)header setMessage: m];
+		/* remote content only when asked: per message (the bar's button), or always (Mail2LoadRemoteContent) */
+		BOOL always = [[NSUserDefaults standardUserDefaults] boolForKey: @"Mail2LoadRemoteContent"];
+		remoteBlocked = !always && Mail2HTMLHasRemoteContent(html);
+		[web setAllowsRemoteContent: always];
+		if (remoteBlocked)
+			[self makeRemoteBar];
+		[remoteBar setHidden: !remoteBlocked];
 		[self layoutAttachments];
 		/* a readable default for mail that sets no style of its own */
 		[web loadHTMLString: [@"<meta charset=\"utf-8\"><style>body{font-family:sans-serif;font-size:14px;margin:14px;"
@@ -595,6 +656,8 @@ initials(NSString *name)
 		return;
 	}
 	[web setHidden: YES];
+	[remoteBar setHidden: YES];
+	remoteBlocked = NO;
 	ASSIGN(msg, m);
 	ASSIGN(attachments, att);
 	[(Mail2HeaderView *)header setMessage: m];

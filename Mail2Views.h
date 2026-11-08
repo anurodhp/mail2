@@ -46,6 +46,8 @@
 	id web;				/* a FloWebView (libFloWeb), made the first time an HTML message is shown */
 	NSDictionary *inlineParts;
 	BOOL showingWeb;
+	NSView *remoteBar;		/* "remote content was not loaded" and its button */
+	BOOL remoteBlocked;		/* the shown HTML has remote content that was not loaded */
 }
 - (void) showNothing: (NSString *)why;		/* "No Message Selected", "3 messages selected" */
 - (void) showMessage: (Mail2MessageInfo *)m body: (NSString *)body attachments: (NSArray *)att;
@@ -76,6 +78,7 @@
  * message is then shown as text. Main thread only. */
 Class Mail2WebViewClass(void);
 BOOL Mail2WebViewInstalled(void);	/* the library is there (and has not failed): cheap, any thread */
+
 
 /* tail-truncated attributed string with Milan's font fallback */
 NSAttributedString *Mail2FittedString(NSString *s, NSDictionary *attrs, CGFloat width);

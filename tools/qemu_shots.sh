@@ -10,6 +10,8 @@
 # Usage: tools/qemu_shots.sh
 #        FLORENCE_DEPLOY=../florence/build/deploy tools/qemu_shots.sh   # with Florence's WebKit (its
 #            scripts/deploy_pi_webkit.sh stage): only the HTML message, shown in WebKit (docs/qemu-html.png)
+#        MULTI=1 tools/qemu_shots.sh   # two accounts: All Inboxes, the Accounts window, a Microsoft sign-in's code
+#            (tests/oauth_mock.py on the host stands in for Microsoft)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd -P)"
 IOKIT_DIR="${IOKIT_DIR:-$HERE/../iokit}"
@@ -31,6 +33,11 @@ GM_PID=$!
 trap 'kill $GM_PID 2>/dev/null || true' EXIT
 for i in $(seq 1 60); do nc -z 127.0.0.1 3143 2>/dev/null && nc -z 127.0.0.1 3025 2>/dev/null && break; sleep 0.5; done
 python3 -I "$HERE/tools/seed_mail.py"
+if [ "${MULTI:-0}" = 1 ]; then
+    python3 -I "$HERE/tests/oauth_mock.py" 3080 100000 > "$B/oauth_mock_qemu.log" 2>&1 &
+    OA_PID=$!
+    trap 'kill $GM_PID $OA_PID 2>/dev/null || true' EXIT
+fi
 
 with_root() {
     local disk slice
@@ -67,13 +74,21 @@ put() {
         rsync -a "$FLORENCE_DEPLOY/" "$MNT/"
         echo "HTML_SHOT=1" > "$MNT/var/root/mail2_shots.env"
     fi
-    python3 -I - "$MNT/var/root/GNUstep/Library/Mail2/Accounts.plist" <<'PY'
+    if [ "${MULTI:-0}" = 1 ]; then
+        { echo "MULTI_SHOT=1"
+          echo "MAIL2_ARGS='-Mail2MicrosoftClientID qemu-test -Mail2MicrosoftDeviceURL http://10.0.2.2:3080/devicecode -Mail2MicrosoftTokenURL http://10.0.2.2:3080/token'"
+        } > "$MNT/var/root/mail2_shots.env"
+    fi
+    python3 -I - "$MNT/var/root/GNUstep/Library/Mail2/Accounts.plist" "${MULTI:-0}" <<'PY'
 import plistlib, sys
-acct = dict(Identifier="test1@localhost", FullName="Test One", Email="test1@localhost", Password="pw1",
-            IMAPHost="10.0.2.2", IMAPUser="test1@localhost", IMAPPort=3143, IMAPSecurity=2,
-            SMTPHost="10.0.2.2", SMTPUser="test1@localhost", SMTPPort=3025, SMTPSecurity=2)
+def acct(n, name):
+    e = "test%d@localhost" % n
+    return dict(Identifier=e, FullName=name, Email=e, Password="pw%d" % n,
+                IMAPHost="10.0.2.2", IMAPUser=e, IMAPPort=3143, IMAPSecurity=2,
+                SMTPHost="10.0.2.2", SMTPUser=e, SMTPPort=3025, SMTPSecurity=2)
+accts = [acct(1, "Test One")] + ([acct(2, "Test Two")] if sys.argv[2] == "1" else [])
 with open(sys.argv[1], "wb") as f:
-    plistlib.dump([acct], f)
+    plistlib.dump(accts, f)
 PY
     chmod 600 "$MNT/var/root/GNUstep/Library/Mail2/Accounts.plist"
     cp -p "$MNT/var/root/GNUstep/Library/Mail2/Accounts.plist" "$MNT/GNUstep/Library/Mail2/Accounts.plist"
@@ -97,7 +112,7 @@ rc=0
 with_root get
 ls -l "$HERE"/docs/qemu-*.png 2>/dev/null || true
 
-[ -n "${FLORENCE_DEPLOY:-}" ] && exit $rc
+[ -n "${FLORENCE_DEPLOY:-}" ] || [ "${MULTI:-0}" = 1 ] && exit $rc
 # did the typed message reach test2?
 python3 -I - <<'PY' || rc=1
 import imaplib

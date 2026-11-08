@@ -25,7 +25,20 @@ identifier_for(NSString *email)
 	return [r length] ? [r lowercaseString] : @"account";
 }
 
+NSString *const Mail2AccountChanged = @"Mail2AccountChanged";
+
 @implementation Mail2Account
+
++ (Mail2Auth) oauthProviderForEmail: (NSString *)addr
+{
+	NSString *domain = [[[addr componentsSeparatedByString: @"@"] lastObject] lowercaseString];
+	if ([domain isEqualToString: @"gmail.com"] || [domain isEqualToString: @"googlemail.com"])
+		return Mail2AuthGoogle;
+	if ([domain isEqualToString: @"outlook.com"] || [domain isEqualToString: @"hotmail.com"] || [domain isEqualToString: @"live.com"] ||
+	    [domain isEqualToString: @"msn.com"] || [domain hasPrefix: @"outlook."] || [domain hasPrefix: @"hotmail."])
+		return Mail2AuthMicrosoft;
+	return Mail2AuthPassword;
+}
 
 + (Mail2Account *) accountForEmail: (NSString *)addr
 {
@@ -51,6 +64,13 @@ identifier_for(NSString *email)
 	} else if ([domain isEqualToString: @"fastmail.com"] || [domain isEqualToString: @"fastmail.fm"]) {
 		[a setImapHost: @"imap.fastmail.com"];
 		[a setSmtpHost: @"smtp.fastmail.com"];
+	} else if ([Mail2Account oauthProviderForEmail: addr] == Mail2AuthMicrosoft) {
+		/* Outlook.com and Microsoft 365: OAuth only */
+		[a setImapHost: @"outlook.office365.com"];
+		[a setSmtpHost: @"smtp.office365.com"];
+		[a setSmtpPort: 587];
+		[a setSmtpSecurity: Mail2SecuritySTARTTLS];
+		[a setAuth: Mail2AuthMicrosoft];
 	} else if ([domain hasPrefix: @"yahoo."] || [domain isEqualToString: @"ymail.com"]) {
 		[a setImapHost: @"imap.mail.yahoo.com"];
 		[a setSmtpHost: @"smtp.mail.yahoo.com"];
@@ -83,6 +103,9 @@ identifier_for(NSString *email)
 		[a setSmtpUser: [d objectForKey: @"SMTPUser"]];
 		[a setSmtpPort: [[d objectForKey: @"SMTPPort"] intValue]];
 		[a setSmtpSecurity: [[d objectForKey: @"SMTPSecurity"] intValue]];
+		[a setAuth: [[d objectForKey: @"Auth"] intValue]];
+		[a setRefreshToken: [[d objectForKey: @"RefreshToken"] length] ? [d objectForKey: @"RefreshToken"] : nil];
+		[a setSignature: [d objectForKey: @"Signature"]];
 		[r addObject: a];
 	}
 	return r;
@@ -107,6 +130,9 @@ identifier_for(NSString *email)
 		    [a smtpUser] ? [a smtpUser] : @"", @"SMTPUser",
 		    [NSNumber numberWithInt: [a smtpPort]], @"SMTPPort",
 		    [NSNumber numberWithInt: [a smtpSecurity]], @"SMTPSecurity",
+		    [NSNumber numberWithInt: [a auth]], @"Auth",
+		    [a refreshToken] ? [a refreshToken] : @"", @"RefreshToken",
+		    [a signature] ? [a signature] : @"", @"Signature",
 		    nil]];
 	}
 	NSString *p = accounts_path();
@@ -123,7 +149,8 @@ identifier_for(NSString *email)
 - (void) dealloc
 {
 	[identifier release]; [fullName release]; [email release]; [password release];
-	[imapHost release]; [imapUser release]; [smtpHost release]; [smtpUser release];
+	[imapHost release]; [imapUser release]; [smtpHost release]; [smtpUser release]; [refreshToken release];
+	[signature release];
 	[super dealloc];
 }
 
@@ -169,4 +196,11 @@ identifier_for(NSString *email)
 - (void) setSmtpUser: (NSString *)s { ASSIGN(smtpUser, s); }
 - (void) setSmtpPort: (int)p { smtpPort = p; }
 - (void) setSmtpSecurity: (Mail2Security)s { smtpSecurity = s; }
+- (Mail2Auth) auth { return auth; }
+- (void) setAuth: (Mail2Auth)a { auth = a; }
+- (NSString *) refreshToken { return refreshToken; }
+- (void) setRefreshToken: (NSString *)t { ASSIGN(refreshToken, t); }
+- (BOOL) usesOAuth { return auth != Mail2AuthPassword; }
+- (NSString *) signature { return signature; }
+- (void) setSignature: (NSString *)s { ASSIGN(signature, [s length] ? s : nil); }
 @end

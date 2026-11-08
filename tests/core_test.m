@@ -8,6 +8,8 @@
 #import "Mail2Store.h"
 #import "Mail2Session.h"
 #import "Mail2Util.h"
+#import "Mail2OAuth.h"
+#include <mbedtls/sha256.h>
 #include "Mail2TLS.h"
 #include <libetpan/mailstream.h>
 #include <libetpan/mailstream_helper.h>
@@ -417,6 +419,190 @@ main(void)
 		CHECK(drafts && [[store messagesInMailbox: [drafts mbid] limit: 10] count] == 0 && dex == 0, "sent: the draft is removed");
 		[s2 release];
 	}
+
+	printf("All Inboxes (two accounts)\n");
+	{
+		Mail2Account *b1 = account(@"test1@localhost", @"pw1"), *b2 = account(@"test2@localhost", @"pw2");
+		Mail2Session *t1 = [[Mail2Session alloc] initWithAccount: b1], *t2 = [[Mail2Session alloc] initWithAccount: b2];
+		NSData *r = Mail2BuildMessage(@"test1@localhost", [NSArray arrayWithObject: @"test2@localhost"], nil, @"for two zebrafish",
+		    @"hello two", nil, nil);
+		Mail2SendMessage(a1, r, [NSArray arrayWithObject: @"test2@localhost"], &err);
+		[t1 refreshMailboxes];
+		[t2 refreshMailboxes];
+		wait_for(^BOOL { return ![t1 isBusy] && ![t2 isBusy]; }, 20);
+		[t1 checkInboxAnd: nil];
+		[t2 checkInboxAnd: nil];
+		BOOL both = wait_for(^BOOL { return ![t1 isBusy] && ![t2 isBusy] &&
+		    [[store messagesInMailbox: [[t2 mailboxWithSpecial: @"inbox"] mbid] limit: 100] count] > 0; }, 30);
+		NSUInteger n1 = [[store messagesInMailbox: [[t1 mailboxWithSpecial: @"inbox"] mbid] limit: 1000] count];
+		NSUInteger n2 = [[store messagesInMailbox: [[t2 mailboxWithSpecial: @"inbox"] mbid] limit: 1000] count];
+		NSUInteger all = [[store messagesInMailbox: Mail2AllInboxesID limit: 1000] count];
+		CHECK(both && n1 > 0 && n2 > 0 && all == n1 + n2, "every Inbox together: %lu = %lu + %lu", (unsigned long)all,
+		    (unsigned long)n1, (unsigned long)n2);
+		CHECK([store unreadInMailbox: Mail2AllInboxesID] == [store unreadInInboxes], "its unread count");
+		CHECK([[store conversationsInMailbox: Mail2AllInboxesID limit: 1000] count] > 0 &&
+		    [[store conversationsInMailbox: Mail2AllInboxesID limit: 1000] count] <= all, "as conversations");
+		NSArray *z = [store searchMailbox: Mail2AllInboxesID text: @"zebrafish" alsoUids: nil limit: 50];
+		CHECK([z count] == 1 && [[[store mailboxWithID: [[z objectAtIndex: 0] mbid]] account] isEqualToString: @"test2@localhost"],
+		    "search across them finds test2's message");
+		[t1 release];
+		[t2 release];
+	}
+
+	printf("OAuth (a stand-in for the providers on 127.0.0.1:3080)\n");
+	{
+		NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+		[ud registerDefaults: [NSDictionary dictionaryWithObjectsAndKeys:
+		    @"test-google-client", @"Mail2GoogleClientID", @"test-ms-client", @"Mail2MicrosoftClientID",
+		    @"http://127.0.0.1:3080/auth", @"Mail2GoogleAuthURL", @"http://127.0.0.1:3080/token", @"Mail2GoogleTokenURL",
+		    @"http://127.0.0.1:3080/devicecode", @"Mail2MicrosoftDeviceURL", @"http://127.0.0.1:3080/token", @"Mail2MicrosoftTokenURL",
+		    nil]];
+		CHECK([Mail2Account oauthProviderForEmail: @"a@gmail.com"] == Mail2AuthGoogle &&
+		    [Mail2Account oauthProviderForEmail: @"a@outlook.com"] == Mail2AuthMicrosoft &&
+		    [Mail2Account oauthProviderForEmail: @"a@example.com"] == Mail2AuthPassword &&
+		    [[[Mail2Account accountForEmail: @"a@hotmail.com"] imapHost] isEqualToString: @"outlook.office365.com"],
+		    "providers from the address; Outlook.com's servers");
+
+		/* a refresh: the token, the rotated refresh token saved and announced */
+		Mail2Account *g = account(@"test1@localhost", nil);
+		[g setAuth: Mail2AuthGoogle];
+		[g setRefreshToken: @"rt-1"];
+		__block int announced = 0;
+		id obs = [[NSNotificationCenter defaultCenter] addObserverForName: Mail2AccountChanged object: g queue: nil
+		    usingBlock: ^(NSNotification *n) { announced++; }];
+		NSString *tok = [Mail2OAuth accessTokenForAccount: g error: &err];
+		wait_for(^BOOL { return announced > 0; }, 5);
+		CHECK([tok isEqualToString: @"pw1"] && [[g refreshToken] hasPrefix: @"rt-rotated-"] && announced == 1,
+		    "refresh: access token, new refresh token kept and announced (%@, %@)", tok, err);
+		int st = 0;
+		int before = [[Mail2PostForm(@"http://127.0.0.1:3080/last", [NSDictionary dictionary], &st, &err) objectForKey: @"refreshes"] intValue];
+		[Mail2OAuth accessTokenForAccount: g error: &err];
+		int after = [[Mail2PostForm(@"http://127.0.0.1:3080/last", [NSDictionary dictionary], &st, &err) objectForKey: @"refreshes"] intValue];
+		CHECK(after == before, "the access token is cached until it expires");
+		[[NSNotificationCenter defaultCenter] removeObserver: obs];
+
+		/* IMAP and SMTP with XOAUTH2 (GreenMail takes the password as the token) */
+		Mail2IMAP *oi = [[Mail2IMAP alloc] initWithAccount: g];
+		err = nil;
+		CHECK([oi connect: &err] && [oi select: @"INBOX" uidValidity: NULL uidNext: NULL exists: NULL error: &err],
+		    "IMAP AUTHENTICATE XOAUTH2 (%@)", err);
+		[oi release];
+		err = nil;
+		NSData *om = Mail2BuildMessage(@"test1@localhost", [NSArray arrayWithObject: @"test2@localhost"], nil, @"via xoauth2", @"x", nil, nil);
+		CHECK(Mail2SendMessage(g, om, [NSArray arrayWithObject: @"test2@localhost"], &err), "SMTP AUTH XOAUTH2, Google's form (%@)", err);
+		Mail2Account *ms = account(@"test1@localhost", nil);
+		[ms setAuth: Mail2AuthMicrosoft];
+		[ms setRefreshToken: @"rt-ms0"];
+		[Mail2OAuth forgetAccessTokenForAccount: ms];
+		err = nil;
+		CHECK(Mail2SendMessage(ms, om, [NSArray arrayWithObject: @"test2@localhost"], &err), "SMTP AUTH XOAUTH2 for a Microsoft account (%@)", err);
+
+		/* a revoked refresh token: a clear error, no crash */
+		Mail2Account *bad = account(@"test1@localhost", nil);
+		[bad setAuth: Mail2AuthGoogle];
+		[bad setRefreshToken: @"bad"];
+		[Mail2OAuth forgetAccessTokenForAccount: bad];
+		err = nil;
+		Mail2IMAP *bi = [[Mail2IMAP alloc] initWithAccount: bad];
+		CHECK(![bi connect: &err] && [err rangeOfString: @"revoked"].location != NSNotFound, "revoked: %@", err);
+		[bi release];
+
+		/* Microsoft's device flow: the code shown, pending once, then the tokens (a chunked answer) */
+		Mail2Account *dev = account(@"dev@localhost", nil);
+		[dev setAuth: Mail2AuthMicrosoft];
+		__block NSString *shown = nil;
+		int cpa[2];
+		pipe(cpa);
+		int cp0 = cpa[0], cp1 = cpa[1];
+		__block BOOL done = NO, ok = NO;
+		__block NSString *derr = nil;
+		dispatch_async(dispatch_get_global_queue(0, 0), ^{
+			NSString *e2 = nil;
+			ok = [Mail2OAuth signIn: dev prompt: ^(NSString *msg, NSString *url, NSString *code) { shown = [code retain]; }
+			    cancelFd: cp0 error: &e2];
+			derr = [e2 retain];
+			done = YES;
+		});
+		wait_for(^BOOL { return done; }, 20);
+		CHECK(ok && [shown isEqualToString: @"ABCD-1234"] && [[dev refreshToken] isEqualToString: @"rt-ms"],
+		    "device flow: code %@ shown, signed in (%@)", shown, derr);
+
+		/* Google's flow: the test plays the browser, coming back to the listener with the code */
+		Mail2Account *goo = account(@"goo@localhost", nil);
+		[goo setAuth: Mail2AuthGoogle];
+		__block NSString *authURL = nil;
+		done = NO; ok = NO;
+		dispatch_async(dispatch_get_global_queue(0, 0), ^{
+			NSString *e2 = nil;
+			ok = [Mail2OAuth signIn: goo prompt: ^(NSString *msg, NSString *url, NSString *code) {
+				authURL = [url retain];
+				NSURLComponents *uc = [NSURLComponents componentsWithString: url];
+				NSString *redirect = nil, *stateV = nil;
+				for (NSURLQueryItem *qi in [uc queryItems]) {
+					if ([[qi name] isEqualToString: @"redirect_uri"]) redirect = [qi value];
+					if ([[qi name] isEqualToString: @"state"]) stateV = [qi value];
+				}
+				NSString *back = [NSString stringWithFormat: @"%@/?state=%@&code=good-code", redirect, stateV];
+				dispatch_async(dispatch_get_global_queue(0, 0), ^{
+					[NSData dataWithContentsOfURL: [NSURL URLWithString: @"/favicon.ico" relativeToURL: [NSURL URLWithString: redirect]]];
+					[NSData dataWithContentsOfURL: [NSURL URLWithString: back]];
+				});
+			} cancelFd: cp0 error: &e2];
+			derr = [e2 retain];
+			done = YES;
+		});
+		wait_for(^BOOL { return done; }, 20);
+		NSDictionary *last = Mail2PostForm(@"http://127.0.0.1:3080/last", [NSDictionary dictionary], &st, &err);
+		NSString *verifier = [last objectForKey: @"verifier"];
+		NSString *challenge = nil;
+		for (NSURLQueryItem *qi in [[NSURLComponents componentsWithString: authURL] queryItems])
+			if ([[qi name] isEqualToString: @"code_challenge"]) challenge = [qi value];
+		unsigned char h[32];
+		mbedtls_sha256((const unsigned char *)[verifier UTF8String], strlen([verifier UTF8String]), h, 0);
+		NSString *expect = [[[[[NSData dataWithBytes: h length: 32] base64EncodedStringWithOptions: 0]
+		    stringByReplacingOccurrencesOfString: @"+" withString: @"-"] stringByReplacingOccurrencesOfString: @"/" withString: @"_"]
+		    stringByReplacingOccurrencesOfString: @"=" withString: @""];
+		CHECK(ok && [[goo refreshToken] isEqualToString: @"rt-google"], "browser flow: back on 127.0.0.1 with the code (%@)", derr);
+		CHECK([challenge isEqualToString: expect], "PKCE: the challenge is S256 of the verifier sent with the code");
+
+		/* Cancel ends a sign-in that is waiting */
+		Mail2Account *can = account(@"can@localhost", nil);
+		[can setAuth: Mail2AuthGoogle];
+		done = NO; ok = YES;
+		dispatch_async(dispatch_get_global_queue(0, 0), ^{
+			NSString *e2 = nil;
+			ok = [Mail2OAuth signIn: can prompt: ^(NSString *msg, NSString *url, NSString *code) {
+				(void)write(cp1, "c", 1);
+			} cancelFd: cp0 error: &e2];
+			derr = [e2 retain];
+			done = YES;
+		});
+		wait_for(^BOOL { return done; }, 10);
+		CHECK(done && !ok && [derr isEqualToString: @"Cancelled."], "Cancel stops the wait (%@)", derr);
+	}
+
+	printf("Addresses and signatures\n");
+	{
+		NSArray *m1 = [store addressesMatching: @"tes" limit: 5];
+		CHECK([m1 count] > 0 && [[[m1 objectAtIndex: 0] lowercaseString] rangeOfString: @"test"].location != NSNotFound,
+		    "people from the index by address: %@", m1);
+		NSArray *m2 = [store addressesMatching: @"zz-nobody" limit: 5];
+		CHECK([m2 count] == 0, "no match, nothing offered");
+		CHECK([[store addressesMatching: @"%_" limit: 5] count] == 0, "LIKE wildcards in the text are taken literally");
+		Mail2Account *sa = account(@"sig@localhost", @"x");
+		[sa setSignature: @"Jane\nSent from a Raspberry Pi"];
+		[Mail2Account saveAccounts: [NSArray arrayWithObject: sa]];
+		NSArray *back = [Mail2Account loadAccounts];
+		CHECK([back count] == 1 && [[[back objectAtIndex: 0] signature] isEqualToString: @"Jane\nSent from a Raspberry Pi"],
+		    "the signature is saved with the account");
+	}
+
+	printf("Remote content\n");
+	CHECK(Mail2HTMLHasRemoteContent(@"<p>Hi</p><img src=\"https://t.example.com/open.gif\" width=1>"), "a tracking pixel");
+	CHECK(Mail2HTMLHasRemoteContent(@"<div style=\"background: URL( 'http://x/y.png' )\">"), "a CSS background");
+	CHECK(Mail2HTMLHasRemoteContent(@"<img SRC = //cdn.example.com/a.png>"), "protocol-relative, odd spacing and case");
+	CHECK(!Mail2HTMLHasRemoteContent(@"<img src=\"cid:part1@x\"><a href=\"https://example.com\">a link</a>"),
+	    "inline images and links are not remote content");
 
 	printf("\n%d checks, %d failed\n", checks, failures);
 	[pool release];

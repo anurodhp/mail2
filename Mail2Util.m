@@ -323,3 +323,17 @@ Mail2BaseSubject(NSString *s)
 	}
 	return t;
 }
+
+NSString *
+Mail2Base64(NSData *d)
+{
+	static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	const unsigned char *p = [d bytes];
+	NSUInteger k, n = [d length];
+	NSMutableString *s = [NSMutableString stringWithCapacity: (n + 2) / 3 * 4];
+	for (k = 0; k < n; k += 3) {
+		unsigned v = p[k] << 16 | (k + 1 < n ? p[k + 1] << 8 : 0) | (k + 2 < n ? p[k + 2] : 0);
+		[s appendFormat: @"%c%c%c%c", tbl[v >> 18 & 63], tbl[v >> 12 & 63], k + 1 < n ? tbl[v >> 6 & 63] : '=', k + 2 < n ? tbl[v & 63] : '='];
+	}
+	return s;
+}

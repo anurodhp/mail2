@@ -23,6 +23,8 @@
 	NSArray *references;
 	NSString *draftId;		/* Message-ID of the copy in Drafts, nil before the first save */
 	NSTimer *autosave;
+	NSString *insertedSig;		/* the signature block put in the body, to swap when From changes */
+	NSMutableDictionary *lastLengths;	/* per address field: its length at the last change */
 	BOOL sending, saving, dirty, closeAfterSave, sent;
 }
 + (Mail2Compose *) newMessageWithSessions: (NSArray *)sessions to: (NSString *)to;

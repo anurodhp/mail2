@@ -58,8 +58,44 @@ PROF=""
 [ "${PROFILE:-0}" = 1 ] && [ -f /usr/local/lib/sample_prof.dylib ] && PROF="DYLD_INSERT_LIBRARIES=/usr/local/lib/sample_prof.dylib SAMPLE_PROF_WALL=1 SAMPLE_PROF_OUT=$T/prof.txt"
 # crashdiag (iokit): a backtrace on a crash
 [ -z "$PROF" ] && [ -f /usr/lib/crashdiag.dylib ] && PROF="DYLD_INSERT_LIBRARIES=/usr/lib/crashdiag.dylib"
-env $PROF MAIL2_DEBUG=1 /Applications/Mail2.app/Mail2 > $T/mail2.log 2>&1 &
+env $PROF MAIL2_DEBUG=1 /Applications/Mail2.app/Mail2 ${MAIL2_ARGS:-} > $T/mail2.log 2>&1 &
 MP=$!
+if [ "${MULTI_SHOT:-0}" = 1 ]; then
+    # two accounts: All Inboxes, the Accounts window, and a Microsoft sign-in showing its code
+    if wait_window 'All Inboxes'; then
+        sleep $SETTLE
+        shot allinboxes
+        $X/xinject key cmd+comma
+        WAIT=300
+        wait_window 'Accounts' && sleep 30 && shot accounts
+        $X/x11_probe tree > $T/tree_accounts.log 2>&1
+        aid=$($X/x11_probe tree | grep ' viewable' | grep 'name=Accounts' | head -1 | awk '{print $1}')
+        [ -n "$aid" ] && $X/xwd -id $aid -out $T/accounts_only.xwd
+        # Add… (the Accounts window's first button) opens the account panel
+        g=$(geometry Accounts); r=${g#*+}; ax=${r%%+*}; ay=${r#*+}; ah=${g#*x}; ah=${ah%%+*}
+        $X/xinject move $((ax + 61)) $((ay + ah - 28)) sleep 300 down $((ax + 61)) $((ay + ah - 28)) sleep 300 up
+        if wait_window 'Mail Account'; then
+            sleep 30
+            $X/xinject type "pi.user" key shift+2 type "outlook.com" sleep 3000 key Return
+            sleep 90
+            shot oauth
+            pid=$($X/x11_probe tree | grep ' viewable' | grep 'name=Mail Account' | head -1 | awk '{print $1}')
+            [ -n "$pid" ] && $X/xwd -id $pid -out $T/oauth_only.xwd
+            $X/xinject move 600 300 sleep 500 move 640 320
+            sleep 15
+            shot oauth_after_move
+            $X/xinject key Escape
+            sleep 10
+        fi
+    else
+        shot failed
+    fi
+    $X/x11_probe tree | grep ' viewable' > $T/windows.log
+    kill $MP 2>/dev/null; sleep 2
+    sync; sleep 2; sync
+    echo "SHOTS DONE"
+    exit 0
+fi
 if wait_window 'Inbox'; then
     # until the list has filled and the bodies are in (the title counts unread)
     sleep $SETTLE

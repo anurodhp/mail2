@@ -265,9 +265,48 @@ scroller_for(NSTableView *t, NSRect r)
 	return nil;
 }
 
+- (BOOL) showingAllInboxes
+{
+	return current != nil && [current mbid] == Mail2AllInboxesID;
+}
+
+/* the account of the mailbox shown; in All Inboxes, of the selected message (else the first account) */
 - (Mail2Session *) currentSession
 {
+	if ([self showingAllInboxes]) {
+		Mail2MessageInfo *m = [[self selectedMessages] count] ? [[self selectedMessages] objectAtIndex: 0] : nil;
+		Mail2Session *s = m ? [self sessionForMessage: m] : nil;
+		return s ? s : ([sessions count] ? [sessions objectAtIndex: 0] : nil);
+	}
 	return current ? [self sessionForAccount: [current account]] : nil;
+}
+
+- (Mail2Session *) sessionForMessage: (Mail2MessageInfo *)m
+{
+	Mail2Mailbox *mb = [[Mail2Store sharedStore] mailboxWithID: [m mbid]];
+	return mb ? [self sessionForAccount: [mb account]] : nil;
+}
+
+/* runs the action once per account with that account's messages (All Inboxes mixes them) */
+- (void) eachSession: (NSArray *)msgs do: (void (^)(Mail2Session *s, NSArray *mine))action
+{
+	NSMutableDictionary *by = [NSMutableDictionary dictionary];
+	NSEnumerator *e = [msgs objectEnumerator];
+	Mail2MessageInfo *m;
+	while ((m = [e nextObject]) != nil) {
+		Mail2Session *s = [self sessionForMessage: m];
+		if (s == nil)
+			continue;
+		NSValue *k = [NSValue valueWithNonretainedObject: s];
+		NSMutableArray *a = [by objectForKey: k];
+		if (a == nil)
+			[by setObject: (a = [NSMutableArray array]) forKey: k];
+		[a addObject: m];
+	}
+	NSEnumerator *ke = [by keyEnumerator];
+	NSValue *k;
+	while ((k = [ke nextObject]) != nil)
+		action([k nonretainedObjectValue], [by objectForKey: k]);
 }
 
 - (void) reloadSidebar
@@ -275,6 +314,8 @@ scroller_for(NSTableView *t, NSRect r)
 	NSEnumerator *e = [sessions objectEnumerator];
 	Mail2Session *s;
 	[sidebarItems removeAllObjects];
+	if ([sessions count] > 1)
+		[sidebarItems addObject: [Mail2Mailbox allInboxes]];
 	while ((s = [e nextObject]) != nil) {
 		NSArray *boxes = [[Mail2Store sharedStore] mailboxesForAccount: [[s account] identifier]];
 		[sidebarItems addObject: [[s account] email]];
@@ -290,14 +331,15 @@ scroller_for(NSTableView *t, NSRect r)
 			continue;
 		if (current && [it mbid] == [current mbid])
 			sel = i;
-		if (first < 0 && [[it special] isEqualToString: @"inbox"])
+		if (first < 0 && ([[it special] isEqualToString: @"inbox"] || [[it special] isEqualToString: @"allinboxes"]))
 			first = i;
 	}
 	syncingSelection = YES;
 	if (sel >= 0) {
 		ASSIGN(current, [sidebarItems objectAtIndex: sel]);	/* fresh counts */
 		[sidebar selectRowIndexes: [NSIndexSet indexSetWithIndex: sel] byExtendingSelection: NO];
-	} else if (current == nil && first >= 0) {
+	} else if (first >= 0) {	/* nothing chosen yet, or the mailbox shown is gone (its account removed) */
+		DESTROY(current);
 		[sidebar selectRowIndexes: [NSIndexSet indexSetWithIndex: first] byExtendingSelection: NO];
 		syncingSelection = NO;
 		[self selectMailbox: [sidebarItems objectAtIndex: first]];
@@ -462,7 +504,12 @@ scroller_for(NSTableView *t, NSRect r)
 	[self reloadMessages];
 	[list scrollRowToVisible: 0];
 	[self showSelection];
-	if (m != nil && [m selectable])
+	if ([self showingAllInboxes]) {
+		NSEnumerator *e = [sessions objectEnumerator];
+		Mail2Session *ss;
+		while ((ss = [e nextObject]) != nil)
+			[ss checkInboxAnd: nil];
+	} else if (m != nil && [m selectable])
 		[[self currentSession] syncMailbox: m];
 }
 
@@ -476,14 +523,15 @@ scroller_for(NSTableView *t, NSRect r)
 - (void) messagesChanged: (NSNotification *)n
 {
 	long long mbid = [[[n userInfo] objectForKey: @"Mailbox"] longLongValue];
-	if (current != nil && mbid == [current mbid])
+	if (current != nil && (mbid == [current mbid] ||
+	    ([self showingAllInboxes] && [[[[Mail2Store sharedStore] mailboxWithID: mbid] special] isEqualToString: @"inbox"])))
 		[self reloadMessages];
 	/* the unread counts */
 	NSUInteger i;
 	for (i = 0; i < [sidebarItems count]; i++) {
 		id it = [sidebarItems objectAtIndex: i];
-		if ([it isKindOfClass: [Mail2Mailbox class]] && [it mbid] == mbid) {
-			((Mail2Mailbox *)it)->unread = [[Mail2Store sharedStore] unreadInMailbox: mbid];
+		if ([it isKindOfClass: [Mail2Mailbox class]] && ([it mbid] == mbid || [it mbid] == Mail2AllInboxesID)) {
+			((Mail2Mailbox *)it)->unread = [[Mail2Store sharedStore] unreadInMailbox: [it mbid]];
 			[sidebar setNeedsDisplayInRect: [sidebar rectOfRow: i]];
 		}
 	}
@@ -544,7 +592,7 @@ scroller_for(NSTableView *t, NSRect r)
 - (void) loadOlderIfNeeded
 {
 	Mail2Session *s = [self currentSession];
-	if (loadingOlder || current == nil || searchText != nil || ![s hasOlderMessagesIn: current] || [s isBusy])
+	if (loadingOlder || current == nil || [self showingAllInboxes] || searchText != nil || ![s hasOlderMessagesIn: current] || [s isBusy])
 		return;
 	[self getOlderMessages: nil];
 }
@@ -552,7 +600,7 @@ scroller_for(NSTableView *t, NSRect r)
 - (void) getOlderMessages: (id)sender
 {
 	Mail2Session *s = [self currentSession];
-	if (loadingOlder || current == nil || ![s hasOlderMessagesIn: current])
+	if (loadingOlder || current == nil || [self showingAllInboxes] || ![s hasOlderMessagesIn: current])
 		return;
 	loadingOlder = YES;
 	long long mbid = [current mbid];
@@ -596,7 +644,7 @@ scroller_for(NSTableView *t, NSRect r)
 /* the server's matches, which also finds mail older than what was synced */
 - (void) searchServer
 {
-	if (searchText == nil || current == nil)
+	if (searchText == nil || current == nil || [self showingAllInboxes])	/* All Inboxes: what is here */
 		return;
 	unsigned gen = searchGeneration;
 	NSString *q = [[searchText copy] autorelease];
@@ -634,7 +682,7 @@ scroller_for(NSTableView *t, NSRect r)
 		return;
 	if (parsed == nil || [[messageView message] rowid] != [m rowid])
 		return;	/* still downloading: the next try works */
-	[Mail2Compose editDraft: m parsed: parsed session: [self currentSession] sessions: sessions];
+	[Mail2Compose editDraft: m parsed: parsed session: [self sessionForMessage: m] sessions: sessions];
 }
 
 - (BOOL) tableView: (NSTableView *)t shouldSelectRow: (NSInteger)r
@@ -712,7 +760,7 @@ scroller_for(NSTableView *t, NSRect r)
 		return;
 	}
 	Mail2MessageInfo *m = [sel objectAtIndex: 0];
-	Mail2Session *s = [self currentSession];
+	Mail2Session *s = [self sessionForMessage: m];
 	if (Mail2Debug())
 		NSLog(@"Mail2: show message uid %u (%@)", [m uid], [m file] ? @"downloaded" : @"to download");
 	unsigned gen = showGeneration;
@@ -751,7 +799,7 @@ scroller_for(NSTableView *t, NSRect r)
 	if (a == @selector(deleteMessages:) || a == @selector(toggleFlag:) || a == @selector(toggleRead:))
 		return [[self selectedMessages] count] > 0;
 	if (a == @selector(getOlderMessages:))
-		return current != nil && !loadingOlder && [[self currentSession] hasOlderMessagesIn: current];
+		return current != nil && ![self showingAllInboxes] && !loadingOlder && [[self currentSession] hasOlderMessagesIn: current];
 	if (a == @selector(editDraft:))
 		return [[self selectedMessage] isDraft] && parsed != nil;
 	return YES;
@@ -816,21 +864,21 @@ scroller_for(NSTableView *t, NSRect r)
 {
 	Mail2MessageInfo *m = [self selectedMessage];
 	if (m != nil && parsed != nil)
-		[Mail2Compose replyTo: m parsed: parsed session: [self currentSession] sessions: sessions replyAll: NO];
+		[Mail2Compose replyTo: m parsed: parsed session: [self sessionForMessage: m] sessions: sessions replyAll: NO];
 }
 
 - (void) replyAll: (id)sender
 {
 	Mail2MessageInfo *m = [self selectedMessage];
 	if (m != nil && parsed != nil)
-		[Mail2Compose replyTo: m parsed: parsed session: [self currentSession] sessions: sessions replyAll: YES];
+		[Mail2Compose replyTo: m parsed: parsed session: [self sessionForMessage: m] sessions: sessions replyAll: YES];
 }
 
 - (void) forward: (id)sender
 {
 	Mail2MessageInfo *m = [self selectedMessage];
 	if (m != nil && parsed != nil)
-		[Mail2Compose forward: m parsed: parsed session: [self currentSession] sessions: sessions];
+		[Mail2Compose forward: m parsed: parsed session: [self sessionForMessage: m] sessions: sessions];
 }
 
 /* after removing rows: select the next message down, as Apple Mail does */
@@ -855,22 +903,29 @@ scroller_for(NSTableView *t, NSRect r)
 {
 	if (![self validateAction: _cmd])
 		return;
-	Mail2Session *s = [self currentSession];
-	if ([s mailboxWithSpecial: @"archive"] == nil && [s mailboxWithSpecial: @"all"] == nil) {
-		NSRunAlertPanel(@"No Archive Mailbox", @"This account has no Archive mailbox.", @"OK", nil, nil);
+	__block BOOL missing = NO;
+	[self eachSession: [self selectedMessages] do: ^(Mail2Session *s, NSArray *mine) {
+		if ([s mailboxWithSpecial: @"archive"] == nil && [s mailboxWithSpecial: @"all"] == nil)
+			missing = YES;
+	}];
+	if (missing) {
+		NSRunAlertPanel(@"No Archive Mailbox", @"The account has no Archive mailbox.", @"OK", nil, nil);
 		return;
 	}
-	[self removeSelectedThen: ^(NSArray *msgs) { [s moveMessages: msgs toSpecial: @"archive"]; }];
+	[self removeSelectedThen: ^(NSArray *msgs) {
+		[self eachSession: msgs do: ^(Mail2Session *s, NSArray *mine) { [s moveMessages: mine toSpecial: @"archive"]; }];
+	}];
 }
 
 - (void) deleteMessages: (id)sender
 {
-	Mail2Session *s = [self currentSession];
 	if ([[current special] isEqualToString: @"trash"] &&
 	    NSRunAlertPanel(@"Delete Permanently?", @"Messages deleted from the Trash cannot be recovered.",
 	        @"Delete", @"Cancel", nil) != NSAlertDefaultReturn)
 		return;
-	[self removeSelectedThen: ^(NSArray *msgs) { [s moveMessages: msgs toSpecial: @"trash"]; }];
+	[self removeSelectedThen: ^(NSArray *msgs) {
+		[self eachSession: msgs do: ^(Mail2Session *s, NSArray *mine) { [s moveMessages: mine toSpecial: @"trash"]; }];
+	}];
 }
 
 - (void) toggleFlag: (id)sender
@@ -879,7 +934,7 @@ scroller_for(NSTableView *t, NSRect r)
 	if ([sel count] == 0)
 		return;
 	BOOL on = ([[sel objectAtIndex: 0] flags] & Mail2FlagFlagged) == 0;
-	[[self currentSession] setFlag: Mail2FlagFlagged on: on forMessages: sel];
+	[self eachSession: sel do: ^(Mail2Session *s, NSArray *mine) { [s setFlag: Mail2FlagFlagged on: on forMessages: mine]; }];
 	[list setNeedsDisplay: YES];
 }
 
@@ -889,7 +944,7 @@ scroller_for(NSTableView *t, NSRect r)
 	if ([sel count] == 0)
 		return;
 	BOOL read = [[sel objectAtIndex: 0] isUnread];
-	[[self currentSession] setFlag: Mail2FlagSeen on: read forMessages: sel];
+	[self eachSession: sel do: ^(Mail2Session *s, NSArray *mine) { [s setFlag: Mail2FlagSeen on: read forMessages: mine]; }];
 	[list setNeedsDisplay: YES];
 }
 

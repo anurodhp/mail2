@@ -48,3 +48,6 @@ NSData *Mail2BuildMessageEx(NSString *from, NSArray *to, NSArray *cc, NSArray *b
     NSString *inReplyTo, NSArray *references, NSArray *attachments, NSString *messageId);
 NSString *Mail2MimeTypeForFilename(NSString *name);
 NSString *Mail2NewMessageID(NSString *fromAddress);	/* "<unique.mail2@the sender's domain>" */
+
+/* whether HTML refers to anything on the web (images, styles): what Load Remote Content would fetch */
+BOOL Mail2HTMLHasRemoteContent(NSString *html);

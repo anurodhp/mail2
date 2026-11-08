@@ -604,3 +604,32 @@ Mail2BuildMessage(NSString *from, NSArray *to, NSArray *cc, NSString *subject, N
 {
 	return Mail2BuildMessageEx(from, to, cc, nil, subject, body, inReplyTo, references, nil, nil);
 }
+
+BOOL
+Mail2HTMLHasRemoteContent(NSString *html)
+{
+	/* an attribute or CSS value that starts (after any quote) with http:, https: or // -- spaces and case ignored */
+	NSString *h = [[[html lowercaseString] componentsSeparatedByCharactersInSet: [NSCharacterSet whitespaceAndNewlineCharacterSet]]
+	    componentsJoinedByString: @""];
+	static NSString *keys[] = { @"src=", @"srcset=", @"background=", @"url(", @"@import", @"poster=" };
+	NSUInteger n = [h length];
+	unsigned i;
+	for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+		NSRange r = NSMakeRange(0, n);
+		for (;;) {
+			NSRange f = [h rangeOfString: keys[i] options: 0 range: r];
+			if (f.location == NSNotFound)
+				break;
+			NSUInteger at = NSMaxRange(f);
+			while (at < n && ([h characterAtIndex: at] == '"' || [h characterAtIndex: at] == '\''))
+				at++;
+			NSString *rest = [h substringWithRange: NSMakeRange(at, MIN((NSUInteger)8, n - at))];
+			if ([rest hasPrefix: @"http:"] || [rest hasPrefix: @"https:"] || [rest hasPrefix: @"//"])
+				return YES;
+			r = NSMakeRange(at, n - at);
+		}
+	}
+	/* <link rel=stylesheet href=http...> */
+	return [h rangeOfString: @"<link"].location != NSNotFound &&
+	    ([h rangeOfString: @"href=\"http"].location != NSNotFound || [h rangeOfString: @"href='http"].location != NSNotFound);
+}

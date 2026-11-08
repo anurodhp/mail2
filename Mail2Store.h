@@ -14,6 +14,9 @@ enum {
 	Mail2FlagDraft = 16,
 };
 
+/* the mailbox id that stands for every account's Inbox in the message queries (the viewer's All Inboxes) */
+#define Mail2AllInboxesID (-1LL)
+
 @interface Mail2Mailbox : NSObject
 {
 @public
@@ -28,10 +31,12 @@ enum {
 - (NSString *) account;
 - (NSString *) name;		/* the IMAP name (modified UTF-7), for commands */
 - (NSString *) displayName;	/* the last path component, decoded; "Inbox" for INBOX */
-- (NSString *) special;		/* inbox, drafts, sent, archive, junk, trash, all, flagged; or nil */
+- (NSString *) special;		/* inbox, drafts, sent, archive, junk, trash, all, flagged; "allinboxes" for the
+				 * viewer's All Inboxes (mbid Mail2AllInboxesID, no account); or nil */
 - (BOOL) selectable;
 - (int) unread;
 - (int) depth;			/* nesting level below its account */
++ (Mail2Mailbox *) allInboxes;	/* the viewer's All Inboxes, unread counted across the accounts */
 @end
 
 @interface Mail2MessageInfo : NSObject
@@ -93,6 +98,7 @@ enum {
 - (void) removeAccount: (NSString *)account;
 
 /* ---- messages ---- */
+/* the message queries below take Mail2AllInboxesID for every account's Inbox together */
 - (NSArray *) messagesInMailbox: (long long)mbid limit: (int)limit;	/* newest first */
 /* the newest message of each conversation, newest first, with -threadCount and -threadUnread */
 - (NSArray *) conversationsInMailbox: (long long)mbid limit: (int)limit;
@@ -114,6 +120,11 @@ enum {
 - (int) unreadInInboxes;	/* every account's Inbox: the dock badge */
 /* the newest messages without a file, for prefetching */
 - (NSArray *) messagesToPrefetchInMailbox: (long long)mbid limit: (int)limit maxSize: (unsigned long long)maxSize;
+
+/* ---- addresses ---- */
+/* people seen ("Name <addr>" or "addr"), whose address or name starts with prefix (or a word of the name does),
+ * those written most first: for completing To, Cc and Bcc */
+- (NSArray *) addressesMatching: (NSString *)prefix limit: (int)limit;
 
 /* ---- files ---- */
 /* writes the raw message into the mailbox's Maildir (tmp, then renamed into cur) and records it with its snippet */

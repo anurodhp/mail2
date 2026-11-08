@@ -57,11 +57,12 @@ responder_name(id r)
 }
 @end
 
-@interface Mail2App : NSObject
+@interface Mail2App : NSObject <Mail2AccountsOwner>
 {
 	NSMutableArray *accounts;
 	NSMutableArray *sessions;
 	Mail2Window *viewer;
+	Mail2AccountsWindow *accountsWindow;
 }
 @end
 
@@ -129,73 +130,113 @@ static NSString *volatile heartbeatMode;
 
 @implementation Mail2App
 
+/* one session per account, in the accounts' order: a session whose account object is still in the list keeps running
+ * (an edited account is a new object: its session is restarted), the others stop */
 - (void) startSessions
 {
-	NSEnumerator *e = [sessions objectEnumerator];
-	Mail2Session *s;
-	while ((s = [e nextObject]) != nil)
-		[s stop];
-	[sessions removeAllObjects];
-	e = [accounts objectEnumerator];
+	NSMutableArray *next = [NSMutableArray array];
+	NSEnumerator *e = [accounts objectEnumerator];
 	Mail2Account *a;
 	while ((a = [e nextObject]) != nil) {
-		Mail2Session *ns = [[[Mail2Session alloc] initWithAccount: a] autorelease];
-		[sessions addObject: ns];
-		[ns start];
+		Mail2Session *found = nil, *s;
+		NSEnumerator *se = [sessions objectEnumerator];
+		while ((s = [se nextObject]) != nil)
+			if ([s account] == a)
+				found = s;
+		if (found == nil) {
+			found = [[[Mail2Session alloc] initWithAccount: a] autorelease];
+			[found start];
+		}
+		[next addObject: found];
 	}
+	e = [sessions objectEnumerator];
+	Mail2Session *old;
+	while ((old = [e nextObject]) != nil)
+		if (![next containsObject: old])
+			[old stop];
+	[sessions setArray: next];
 	if (viewer == nil)
 		viewer = [[Mail2Window alloc] initWithSessions: sessions];
 	else
-		[viewer setSessions: sessions];
+		[viewer setSessions: [NSArray arrayWithArray: sessions]];
+	[accountsWindow reload];
 	Mail2UpdateDockBadge();
+}
+
+- (NSArray *) accounts { return accounts; }
+
+- (void) saveAccounts
+{
+	if (![Mail2Account saveAccounts: accounts])
+		NSRunAlertPanel(@"Cannot Save the Accounts", @"The account settings could not be written to ~/GNUstep/Library/Mail2.",
+		    @"OK", nil, nil);
+}
+
+/* a refresh brought a new OAuth refresh token (Mail2OAuth) */
+- (void) accountChanged: (NSNotification *)n
+{
+	[self saveAccounts];
 }
 
 - (void) addAccount: (id)sender
 {
-	Mail2Account *a = [Mail2AccountPanel runForAccount: nil];
-	if (a == nil)
-		return;
-	NSEnumerator *e = [accounts objectEnumerator];
-	Mail2Account *old;
-	while ((old = [e nextObject]) != nil)
-		if ([[old identifier] isEqualToString: [a identifier]]) {
-			[accounts removeObject: old];
+	[Mail2AccountPanel showForAccount: nil completion: ^(Mail2Account *a) {
+		if (a != nil)
+			[self addOrReplaceAccount: a];
+	}];
+}
+
+- (void) addOrReplaceAccount: (Mail2Account *)a
+{
+	NSUInteger i;
+	for (i = 0; i < [accounts count]; i++)
+		if ([[[accounts objectAtIndex: i] identifier] isEqualToString: [a identifier]]) {
+			[accounts replaceObjectAtIndex: i withObject: a];	/* the same address again: its settings are replaced */
 			break;
 		}
-	[accounts addObject: a];
-	if (![Mail2Account saveAccounts: accounts])
-		NSRunAlertPanel(@"Cannot Save the Account", @"The account settings could not be written to ~/GNUstep/Library/Mail2.",
-		    @"OK", nil, nil);
+	if (i == [accounts count])
+		[accounts addObject: a];
+	[self saveAccounts];
 	[self startSessions];
 }
 
-- (void) editAccount: (id)sender
+- (void) showAccounts: (id)sender
 {
-	if ([accounts count] == 0) {
-		[self addAccount: sender];
-		return;
-	}
-	Mail2Account *cur = [accounts objectAtIndex: 0];
-	Mail2Account *a = [Mail2AccountPanel runForAccount: cur];
-	if (a == nil)
-		return;
-	[accounts replaceObjectAtIndex: 0 withObject: a];
-	[Mail2Account saveAccounts: accounts];
-	[self startSessions];
+	if (accountsWindow == nil)
+		accountsWindow = [[Mail2AccountsWindow alloc] initWithOwner: self];
+	[accountsWindow show];
 }
 
-- (void) removeAccount: (id)sender
+- (void) editAccountAtIndex: (NSUInteger)i
 {
-	if ([accounts count] == 0)
+	if (i >= [accounts count])
 		return;
-	Mail2Account *a = [accounts lastObject];
+	Mail2Account *old = [accounts objectAtIndex: i];
+	[Mail2AccountPanel showForAccount: old completion: ^(Mail2Account *a) {
+		NSUInteger at = [accounts indexOfObjectIdenticalTo: old];
+		if (a == nil || at == NSNotFound)	/* cancelled, or removed meanwhile */
+			return;
+		[accounts replaceObjectAtIndex: at withObject: a];
+		[self saveAccounts];
+		[self startSessions];
+	}];
+}
+
+- (void) removeAccountAtIndex: (NSUInteger)i
+{
+	if (i >= [accounts count])
+		return;
+	Mail2Account *a = [accounts objectAtIndex: i];
 	if (NSRunAlertPanel(@"Remove Account?", @"Remove %@ from Mail2? Its downloaded mail is deleted from this computer; "
 	    "nothing changes on the server.", @"Remove", @"Cancel", nil, [a email]) != NSAlertDefaultReturn)
 		return;
+	[a retain];
+	[accounts removeObjectAtIndex: i];
+	[self startSessions];	/* its session stops before its files go */
 	[[Mail2Store sharedStore] removeAccount: [a identifier]];
-	[accounts removeObject: a];
-	[Mail2Account saveAccounts: accounts];
-	[self startSessions];
+	[a release];
+	[self saveAccounts];
+	[viewer setSessions: [NSArray arrayWithArray: sessions]];
 }
 
 - (void) showViewer: (id)sender
@@ -208,7 +249,7 @@ static NSString *volatile heartbeatMode;
 	NSDictionary *opts = [NSDictionary dictionaryWithObjectsAndKeys:
 	    @"Mail2", @"ApplicationName",
 	    @"A small IMAP mail client for GNUstep.", @"ApplicationDescription",
-	    @"0.2", @"ApplicationRelease",
+	    @"0.3", @"ApplicationRelease",
 	    [NSArray arrayWithObject: @"Anurodh Pokharel"], @"Authors",
 	    @"Copyright © 2026 Anurodh Pokharel. MIT license.", @"Copyright",
 	    @"Mail by libetpan 1.9.4 (BSD), SQLite 3.44 (public domain) and Mbed TLS 3.6 (Apache-2.0). Icons from Lucide (ISC).",
@@ -234,8 +275,7 @@ static NSString *volatile heartbeatMode;
 - (BOOL) validateMenuItem: (NSMenuItem *)i
 {
 	SEL a = [i action];
-	if (a == @selector(removeAccount:) || a == @selector(editAccount:))
-		return [accounts count] > 0;
+
 	if (a == @selector(toggleConversations:)) {
 		[i setState: [Mail2Window organizesByConversation] ? NSOnState : NSOffState];
 		return YES;
@@ -254,9 +294,8 @@ static NSString *volatile heartbeatMode;
 
 	m = [[NSMenu alloc] initWithTitle: @"Mail2"];
 	add_item(m, @"About Mail2", @selector(showAbout:), nil, self);
+	add_item(m, @"Accounts…", @selector(showAccounts:), @",", self);
 	add_item(m, @"Add Account…", @selector(addAccount:), nil, self);
-	add_item(m, @"Account Settings…", @selector(editAccount:), @",", self);
-	add_item(m, @"Remove Account…", @selector(removeAccount:), nil, self);
 	add_item(m, @"Hide Mail2", @selector(hide:), @"h", NSApp);
 	add_item(m, @"Quit Mail2", @selector(terminate:), @"q", NSApp);
 	[main setSubmenu: m forItem: add_item(main, @"Mail2", NULL, nil, nil)]; [m release];
@@ -315,6 +354,7 @@ static NSString *volatile heartbeatMode;
 	if (Mail2Debug())
 		[Mail2Watchdog start];
 	accounts = [[NSMutableArray alloc] initWithArray: [Mail2Account loadAccounts]];
+	[[NSNotificationCenter defaultCenter] addObserver: self selector: @selector(accountChanged:) name: Mail2AccountChanged object: nil];
 	NSLog(@"Mail2: %lu account(s) in %@", (unsigned long)[accounts count], Mail2SupportDirectory());
 	sessions = [[NSMutableArray alloc] init];
 	if ([Mail2Store sharedStore] == nil) {
@@ -322,14 +362,9 @@ static NSString *volatile heartbeatMode;
 		[NSApp terminate: nil];
 		return;
 	}
-	if ([accounts count] == 0) {
-		Mail2Account *a = [Mail2AccountPanel runForAccount: nil];
-		if (a != nil) {
-			[accounts addObject: a];
-			[Mail2Account saveAccounts: accounts];
-		}
-	}
 	[self startSessions];
+	if ([accounts count] == 0)
+		[self addAccount: nil];
 	NSString *to = mailto_argument();
 	if (to != nil && [sessions count] > 0)
 		[Mail2Compose newMessageWithSessions: sessions to: to];

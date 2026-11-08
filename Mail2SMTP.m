@@ -5,6 +5,7 @@
  * sent here on the session's own stream, which by then is TLS. */
 #import "Mail2SMTP.h"
 #import "Mail2Util.h"
+#import "Mail2OAuth.h"
 #include "Mail2TLS.h"
 #include <libetpan/libetpan-config.h>
 #include <libetpan/mailsmtp.h>
@@ -32,19 +33,7 @@ logger(mailsmtp *s, int type, const char *str, size_t size, void *ctx)
 	}
 }
 
-static NSString *
-b64(NSData *d)
-{
-	static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	const unsigned char *p = [d bytes];
-	NSUInteger k, n = [d length];
-	NSMutableString *s = [NSMutableString string];
-	for (k = 0; k < n; k += 3) {
-		unsigned v = p[k] << 16 | (k + 1 < n ? p[k + 1] << 8 : 0) | (k + 2 < n ? p[k + 2] : 0);
-		[s appendFormat: @"%c%c%c%c", tbl[v >> 18 & 63], tbl[v >> 12 & 63], k + 1 < n ? tbl[v >> 6 & 63] : '=', k + 2 < n ? tbl[v & 63] : '='];
-	}
-	return s;
-}
+#define b64 Mail2Base64
 
 /* sends a line (not logged when private) and reads the reply; its code, -1 on a stream error. The last reply line is
  * left in `reply`. */
@@ -148,7 +137,29 @@ Mail2SendMessage(Mail2Account *a, NSData *raw, NSArray *recipients, NSString **e
 			goto out;
 		}
 	}
-	if (s->auth != MAILSMTP_AUTH_NOT_CHECKED && s->auth != MAILSMTP_AUTH_CHECKED && !authenticate(s, a, err))
+	if ([a usesOAuth]) {
+		/* XOAUTH2 with an access token; a refused one is renewed once */
+		int attempt;
+		for (attempt = 0; attempt < 2; attempt++) {
+			NSString *tok = [Mail2OAuth accessTokenForAccount: a error: err];
+			if (tok == nil)
+				goto out;
+			/* "AUTH XOAUTH2 <initial response>" for both: Exchange Online takes it too, as Thunderbird sends it
+			 * (libetpan's two-step Outlook form is not accepted by every server) */
+			r = mailsmtp_oauth2_authenticate(s, [[a smtpUser] UTF8String], [tok UTF8String]);
+			if (r == MAILSMTP_NO_ERROR)
+				break;
+			[Mail2OAuth forgetAccessTokenForAccount: a];
+			if (r == MAILSMTP_ERROR_STREAM) {
+				*err = @"The connection to the outgoing server was lost while logging in.";
+				goto out;
+			}
+		}
+		if (r != MAILSMTP_NO_ERROR) {
+			*err = smtp_error(s, r, @"The outgoing server refused the sign-in");
+			goto out;
+		}
+	} else if (s->auth != MAILSMTP_AUTH_NOT_CHECKED && s->auth != MAILSMTP_AUTH_CHECKED && !authenticate(s, a, err))
 		goto out;
 
 	clist *rcpts = esmtp_address_list_new();

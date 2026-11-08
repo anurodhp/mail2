@@ -19,6 +19,17 @@
 - (int) unread { return unread; }
 - (int) depth { return depth; }
 - (NSString *) description { return [NSString stringWithFormat: @"<Mailbox %lld %@>", mbid, name]; }
++ (Mail2Mailbox *) allInboxes
+{
+	Mail2Mailbox *m = [[[Mail2Mailbox alloc] init] autorelease];
+	m->mbid = Mail2AllInboxesID;
+	m->name = [@"" retain];
+	m->displayName = [@"All Inboxes" retain];
+	m->special = [@"allinboxes" retain];
+	m->selectable = YES;
+	m->unread = [[Mail2Store sharedStore] unreadInInboxes];
+	return m;
+}
 @end
 
 @implementation Mail2MessageInfo
@@ -373,6 +384,9 @@ special_rank(NSString *s)
 
 /* ---- messages ---- */
 
+/* a mailbox, or with Mail2AllInboxesID every account's Inbox (?1 is the mailbox id) */
+#define MBOX "(mailbox = ?1 OR (?1 = -1 AND mailbox IN (SELECT id FROM mailboxes WHERE special = 'inbox')))"
+
 #define MESSAGE_COLUMNS "id, mailbox, uid, flags, date, from_name, from_addr, to_list, cc_list, reply_to, subject," \
 	" message_id, in_reply_to, refs, size, attach, snippet, file, thread"
 
@@ -405,8 +419,8 @@ special_rank(NSString *s)
 {
 	NSMutableArray *r = [NSMutableArray array];
 	[lock lock];
-	sqlite3_stmt *st = [self prepare: "SELECT " MESSAGE_COLUMNS " FROM messages WHERE mailbox = ? AND (flags & 8) = 0"
-	    " ORDER BY date DESC, uid DESC LIMIT ?"];
+	sqlite3_stmt *st = [self prepare: "SELECT " MESSAGE_COLUMNS " FROM messages WHERE " MBOX " AND (flags & 8) = 0"
+	    " ORDER BY date DESC, uid DESC LIMIT ?2"];
 	sqlite3_bind_int64(st, 1, mbid);
 	sqlite3_bind_int(st, 2, limit);
 	while (sqlite3_step(st) == SQLITE_ROW)
@@ -574,8 +588,8 @@ special_rank(NSString *s)
 	sqlite3_stmt *st = [self prepare: "SELECT " MESSAGE_COLUMNS ", n, u FROM (SELECT *,"
 	    " COUNT(*) OVER w AS n, SUM((flags & 1) = 0) OVER w AS u,"
 	    " ROW_NUMBER() OVER (PARTITION BY IFNULL(thread, id) ORDER BY date DESC, uid DESC) AS k"
-	    " FROM messages WHERE mailbox = ? AND (flags & 8) = 0 WINDOW w AS (PARTITION BY IFNULL(thread, id)))"
-	    " WHERE k = 1 ORDER BY date DESC, uid DESC LIMIT ?"];
+	    " FROM messages WHERE " MBOX " AND (flags & 8) = 0 WINDOW w AS (PARTITION BY IFNULL(thread, id)))"
+	    " WHERE k = 1 ORDER BY date DESC, uid DESC LIMIT ?2"];
 	sqlite3_bind_int64(st, 1, mbid);
 	sqlite3_bind_int(st, 2, limit);
 	r = [self rowsFor: st counted: YES];
@@ -589,7 +603,7 @@ special_rank(NSString *s)
 	if (thread == nil)
 		return [NSArray array];
 	[lock lock];
-	sqlite3_stmt *st = [self prepare: "SELECT " MESSAGE_COLUMNS " FROM messages WHERE mailbox = ? AND thread = ?"
+	sqlite3_stmt *st = [self prepare: "SELECT " MESSAGE_COLUMNS " FROM messages WHERE " MBOX " AND thread = ?2"
 	    " AND (flags & 8) = 0 ORDER BY date DESC, uid DESC"];
 	sqlite3_bind_int64(st, 1, mbid);
 	bind_string(st, 2, thread);
@@ -618,12 +632,12 @@ fts_query(NSString *text)
 	NSString *q = fts_query(text);
 	NSString *uidList = [uids count] ? [uids componentsJoinedByString: @","] : @"";
 	NSMutableString *sql = [NSMutableString stringWithString:
-	    @"SELECT " MESSAGE_COLUMNS " FROM messages WHERE mailbox = ?1 AND (flags & 8) = 0 AND ("
+	    @"SELECT " MESSAGE_COLUMNS " FROM messages WHERE " MBOX " AND (flags & 8) = 0 AND ("
 	    " (subject LIKE ?2 ESCAPE '\\' OR from_name LIKE ?2 ESCAPE '\\' OR from_addr LIKE ?2 ESCAPE '\\'"
 	    "  OR to_list LIKE ?2 ESCAPE '\\' OR cc_list LIKE ?2 ESCAPE '\\' OR snippet LIKE ?2 ESCAPE '\\')"];
 	if ([q length])
 		[sql appendString: @" OR id IN (SELECT docid FROM bodies WHERE body MATCH ?3)"];
-	if ([uidList length])	/* numbers only: from the server's search */
+	if ([uidList length] && mbid != Mail2AllInboxesID)	/* numbers only: from the server's search */
 		[sql appendFormat: @" OR uid IN (%@)", uidList];
 	[sql appendString: @") ORDER BY date DESC, uid DESC LIMIT ?4"];
 	NSString *like = [[[text stringByReplacingOccurrencesOfString: @"\\" withString: @"\\\\"]
@@ -728,6 +742,8 @@ fts_query(NSString *text)
 
 - (int) unreadInMailbox: (long long)mbid
 {
+	if (mbid == Mail2AllInboxesID)
+		return [self unreadInInboxes];
 	return [self countQuery: "SELECT COUNT(*) FROM messages WHERE mailbox = ? AND (flags & 9) = 0" mailbox: mbid];
 }
 
@@ -756,6 +772,56 @@ fts_query(NSString *text)
 	while (sqlite3_step(st) == SQLITE_ROW)
 		[r addObject: [self messageFromRow: st]];
 	sqlite3_finalize(st);
+	[lock unlock];
+	return r;
+}
+
+/* ---- addresses ---- */
+
+- (NSArray *) addressesMatching: (NSString *)prefix limit: (int)limit
+{
+	NSMutableArray *r = [NSMutableArray array];
+	NSMutableSet *seen = [NSMutableSet set];
+	NSString *p = [[prefix lowercaseString] stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]];
+	if ([p length] == 0)
+		return r;
+	NSString *like = [[[p stringByReplacingOccurrencesOfString: @"\\" withString: @"\\\\"]
+	    stringByReplacingOccurrencesOfString: @"%" withString: @"\\%"] stringByReplacingOccurrencesOfString: @"_" withString: @"\\_"];
+	[lock lock];
+	/* senders, most frequent first: a name or an address starting with the text (or a word of the name) */
+	sqlite3_stmt *st = [self prepare: "SELECT from_name, from_addr, COUNT(*) AS n FROM messages WHERE from_addr IS NOT NULL AND"
+	    " (lower(from_addr) LIKE ?1 ESCAPE '\\' OR lower(from_name) LIKE ?1 ESCAPE '\\' OR lower(from_name) LIKE ?2 ESCAPE '\\')"
+	    " GROUP BY lower(from_addr) ORDER BY n DESC, MAX(date) DESC LIMIT ?3"];
+	bind_string(st, 1, [like stringByAppendingString: @"%"]);
+	bind_string(st, 2, [NSString stringWithFormat: @"%% %@%%", like]);
+	sqlite3_bind_int(st, 3, limit);
+	while (st && sqlite3_step(st) == SQLITE_ROW) {
+		NSString *name = col_string(st, 0), *addr = col_string(st, 1);
+		if (addr == nil || [seen containsObject: [addr lowercaseString]])
+			continue;
+		[seen addObject: [addr lowercaseString]];
+		[r addObject: [name length] ? [NSString stringWithFormat: @"%@ <%@>", name, addr] : addr];
+	}
+	sqlite3_finalize(st);
+	/* and people written to (the To lines of Sent) */
+	if ((int)[r count] < limit) {
+		st = [self prepare: "SELECT to_list FROM messages JOIN mailboxes ON messages.mailbox = mailboxes.id"
+		    " WHERE mailboxes.special = 'sent' AND lower(to_list) LIKE ?1 ORDER BY date DESC LIMIT 200"];
+		bind_string(st, 1, [NSString stringWithFormat: @"%%%@%%", p]);
+		while (st && sqlite3_step(st) == SQLITE_ROW && (int)[r count] < limit) {
+			NSEnumerator *e = [Mail2SplitAddresses(col_string(st, 0)) objectEnumerator];
+			NSString *a;
+			while ((a = [e nextObject]) != nil && (int)[r count] < limit) {
+				NSString *bare = [Mail2AddressPart(a) lowercaseString];
+				if ([seen containsObject: bare] || ([bare rangeOfString: p].location != 0 &&
+				    [[a lowercaseString] rangeOfString: p].location != 0))
+					continue;
+				[seen addObject: bare];
+				[r addObject: a];
+			}
+		}
+		sqlite3_finalize(st);
+	}
 	[lock unlock];
 	return r;
 }

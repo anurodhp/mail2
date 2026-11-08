@@ -3,6 +3,9 @@
 #import "Mail2IMAP.h"
 #import "Mail2Util.h"
 #import "Mail2Views.h"
+#import "Mail2OAuth.h"
+#include <fcntl.h>
+#include <unistd.h>
 #include <dispatch/dispatch.h>
 
 static NSTextField *
@@ -40,19 +43,78 @@ make_security(NSView *v, NSRect r)
 	return p;
 }
 
+/* Drawn once more a moment after it is shown: its first drawing can happen before the window is mapped, and GNUstep
+ * repaints only after an event, so it sat there empty until one came (QEMU, 2026-11-08: the window held its contents,
+ * the screen did not). */
+@interface NSWindow (Mail2Kick)
+- (void) mail2Kick;
+@end
+@implementation NSWindow (Mail2Kick)
+/* a frame change and back, displayed: the window is configured (and exposed) again */
+- (void) mail2Kick
+{
+	NSRect f = [self frame], g = f;
+	g.size.height += 1;
+	[self setFrame: g display: YES];
+	[self setFrame: f display: YES];
+	[self display];
+	[self flushWindow];
+}
+@end
+
+static void
+redisplay_soon(NSWindow *w)
+{
+	NSArray *modes = [NSArray arrayWithObjects: NSDefaultRunLoopMode, NSModalPanelRunLoopMode, nil];
+	[w performSelector: @selector(display) withObject: nil afterDelay: 0.3 inModes: modes];
+	[w performSelector: @selector(mail2Kick) withObject: nil afterDelay: 1.5 inModes: modes];
+	Mail2WakeEventLoop();
+}
+
+/* a content rect of this size in the middle of the screen. Windows are made where they will be: -center after
+ * creation left these windows' contents unpainted on screen (QEMU, 2026-11-08), while the viewer and compose
+ * windows, made in place, were fine. */
+/* the panel's background; logs its drawing with MAIL2_DEBUG (whether it is drawn at all, QEMU 2026-11-08) */
+@interface Mail2PanelBackground : NSView
+@end
+@implementation Mail2PanelBackground
+- (void) drawRect: (NSRect)r
+{
+	if (Mail2Debug())
+		NSLog(@"Mail2: %@ drawn %@", [[self window] title], NSStringFromRect(r));
+	[[NSColor windowBackgroundColor] set];
+	NSRectFill(r);
+}
+@end
+
+static NSRect
+centered(CGFloat w, CGFloat h)
+{
+	NSRect v = [[NSScreen mainScreen] visibleFrame];
+	if (NSWidth(v) <= 0)
+		return NSMakeRect(100, 100, w, h);
+	return NSMakeRect(floor(NSMidX(v) - w / 2), floor(NSMidY(v) - h / 2 + 60), w, h);
+}
+
 @implementation Mail2AccountPanel
 
 - (id) init
 {
 	if ((self = [super init]) == nil)
 		return nil;
-	panel = [[Mail2KeyOrderPanel alloc] initWithContentRect: NSMakeRect(0, 0, 480, 470)
-	    styleMask: NSTitledWindowMask backing: NSBackingStoreBuffered defer: NO];
+	cancelPipe[0] = cancelPipe[1] = -1;
+	/* a panel, not a window: a window becoming key makes the Eau theme push the application's menu to Naples, and that
+	 * distributed-objects call crashed GNUstep base here twice (QEMU, 2026-11-08); a panel makes no push */
+	panel = [[Mail2KeyOrderPanel alloc] initWithContentRect: centered(480, 590)
+	    styleMask: NSTitledWindowMask | NSClosableWindowMask backing: NSBackingStoreBuffered defer: NO];
+	[panel setHidesOnDeactivate: NO];
+	[panel setContentView: [[[Mail2PanelBackground alloc] initWithFrame: [[panel contentView] frame]] autorelease]];
+	[panel setDelegate: (id)self];
 	[panel setTitle: @"Mail Account"];
 	NSView *v = [panel contentView];
-	CGFloat y = 430, lx = 16, lw = 110, fx = 132, fw = 330;
+	CGFloat y = 550, lx = 16, lw = 110, fx = 132, fw = 330;
 
-	make_label(v, @"Sign in to your mail account. For Gmail, iCloud and Yahoo, use an app password.",
+	make_label(v, @"Sign in to your mail account. iCloud and Yahoo need an app password.",
 	    NSMakeRect(lx, y, 448, 18), NO);
 	[[[v subviews] lastObject] setAlignment: NSLeftTextAlignment];
 	y -= 34;
@@ -62,7 +124,17 @@ make_security(NSView *v, NSRect r)
 	make_label(v, @"Email Address:", NSMakeRect(lx, y, lw, 18), NO);
 	emailField = [make_field(v, NSMakeRect(fx, y - 2, fw, 22)) retain];
 	[emailField setDelegate: (id)self];
-	y -= 30;
+	y -= 32;
+	make_label(v, @"Sign in with:", NSMakeRect(lx, y, lw, 18), NO);
+	authPopup = [[NSPopUpButton alloc] initWithFrame: NSMakeRect(fx, y - 4, 200, 26) pullsDown: NO];
+	[authPopup addItemWithTitle: @"Password"];
+	[authPopup addItemWithTitle: @"Google (OAuth)"];
+	[authPopup addItemWithTitle: @"Microsoft (OAuth)"];
+	[authPopup setTarget: self];
+	[authPopup setAction: @selector(authChanged:)];
+	[authPopup setRefusesFirstResponder: YES];
+	[v addSubview: authPopup];
+	y -= 32;
 	make_label(v, @"Password:", NSMakeRect(lx, y, lw, 18), NO);
 	passField = [[NSSecureTextField alloc] initWithFrame: NSMakeRect(fx, y - 2, fw, 22)];
 	[v addSubview: passField];
@@ -91,7 +163,21 @@ make_security(NSView *v, NSRect r)
 	smtpUser = [make_field(v, NSMakeRect(fx, y - 2, 200, 22)) retain];
 	smtpSec = [make_security(v, NSMakeRect(fx + 210, y - 4, 120, 26)) retain];
 
-	y -= 46;
+	y -= 40;
+	make_label(v, @"Signature:", NSMakeRect(lx, y, lw, 18), NO);
+	NSScrollView *ss = [[[NSScrollView alloc] initWithFrame: NSMakeRect(fx, y - 50, fw, 70)] autorelease];
+	[ss setHasVerticalScroller: YES];
+	[ss setBorderType: NSBezelBorder];
+	sigView = [[NSTextView alloc] initWithFrame: NSMakeRect(0, 0, [ss contentSize].width, [ss contentSize].height)];
+	[sigView setRichText: NO];
+	[sigView setFont: [NSFont systemFontOfSize: 12]];
+	[sigView setVerticallyResizable: YES];
+	[sigView setHorizontallyResizable: NO];
+	[sigView setAutoresizingMask: NSViewWidthSizable];
+	[[sigView textContainer] setWidthTracksTextView: YES];
+	[ss setDocumentView: sigView];
+	[v addSubview: ss];
+	y -= 60;
 	message = [make_label(v, @"", NSMakeRect(lx, y - 14, 448, 34), NO) retain];
 	[message setAlignment: NSLeftTextAlignment];
 	[message setTextColor: [NSColor colorWithCalibratedRed: 0.75 green: 0.1 blue: 0.1 alpha: 1]];
@@ -126,7 +212,8 @@ make_security(NSView *v, NSRect r)
 	[imapUser setNextKeyView: smtpHost];
 	[smtpHost setNextKeyView: smtpPort];
 	[smtpPort setNextKeyView: smtpUser];
-	[smtpUser setNextKeyView: nameField];
+	[smtpUser setNextKeyView: sigView];
+	[sigView setNextKeyView: nameField];
 	return self;
 }
 
@@ -136,13 +223,15 @@ make_security(NSView *v, NSRect r)
 	[imapHost release]; [imapPort release]; [imapUser release]; [imapSec release];
 	[smtpHost release]; [smtpPort release]; [smtpUser release]; [smtpSec release];
 	[message release]; [okButton release]; [cancelButton release]; [autoDomain release]; [result release];
+	[authPopup release]; [existing release]; [completion release]; [sigView release];
+	if (cancelPipe[0] >= 0) { close(cancelPipe[0]); close(cancelPipe[1]); }
 	[super dealloc];
 }
 
 - (NSArray *) fieldOrder
 {
 	return [NSArray arrayWithObjects: nameField, emailField, passField, imapHost, imapPort, imapUser, smtpHost, smtpPort,
-	    smtpUser, nil];
+	    smtpUser, sigView, nil];
 }
 
 - (void) fillFrom: (Mail2Account *)a
@@ -173,6 +262,34 @@ make_security(NSView *v, NSRect r)
 		return;
 	ASSIGN(autoDomain, domain);
 	[self fillFrom: [Mail2Account accountForEmail: e]];
+	if (!authChosen) {
+		[authPopup selectItemAtIndex: [Mail2Account oauthProviderForEmail: e]];
+		[self updateAuth];
+	}
+}
+
+/* OAuth: no password; what Sign In will do */
+- (void) updateAuth
+{
+	Mail2Auth a = (Mail2Auth)[authPopup indexOfSelectedItem];
+	[passField setEnabled: a == Mail2AuthPassword];
+	[passField setEditable: a == Mail2AuthPassword];
+	if (a == Mail2AuthPassword) {
+		[message setStringValue: @""];
+		return;
+	}
+	NSString *missing = [Mail2OAuth missingClientMessage: a];
+	[message setTextColor: missing ? [NSColor colorWithCalibratedRed: 0.75 green: 0.1 blue: 0.1 alpha: 1]
+	                               : [NSColor colorWithCalibratedWhite: 0.35 alpha: 1]];
+	[message setStringValue: missing ? missing : (a == Mail2AuthGoogle
+	    ? @"Sign In opens Google's sign-in page in the browser."
+	    : @"Sign In shows a code to enter on Microsoft's sign-in page.")];
+}
+
+- (void) authChanged: (id)sender
+{
+	authChosen = YES;
+	[self updateAuth];
 }
 
 - (Mail2Account *) accountFromFields
@@ -188,6 +305,13 @@ make_security(NSView *v, NSRect r)
 	[a setSmtpPort: [smtpPort intValue]];
 	[a setSmtpUser: [smtpUser stringValue]];
 	[a setSmtpSecurity: (Mail2Security)[smtpSec indexOfSelectedItem]];
+	[a setAuth: (Mail2Auth)[authPopup indexOfSelectedItem]];
+	[a setSignature: [[sigView string] stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceAndNewlineCharacterSet]]];
+	/* editing an OAuth account keeps its sign-in */
+	if (existing != nil && [existing auth] == [a auth] && [a usesOAuth])
+		[a setRefreshToken: [existing refreshToken]];
+	if ([a usesOAuth])
+		[a setPassword: nil];
 	return a;
 }
 
@@ -206,19 +330,44 @@ make_security(NSView *v, NSRect r)
 		[message setStringValue: @"Enter your email address."];
 		return;
 	}
-	if ([[passField stringValue] length] == 0) {
+	Mail2Auth auth = (Mail2Auth)[authPopup indexOfSelectedItem];
+	if (auth == Mail2AuthPassword && [[passField stringValue] length] == 0) {
 		[message setStringValue: @"Enter your password."];
 		return;
 	}
+	if ([Mail2OAuth missingClientMessage: auth]) {
+		[self updateAuth];
+		return;
+	}
 	Mail2Account *a = [[self accountFromFields] retain];
+	BOOL needSignIn = [a usesOAuth] && [[a refreshToken] length] == 0;
 	[message setTextColor: [NSColor colorWithCalibratedWhite: 0.35 alpha: 1]];
-	[message setStringValue: [NSString stringWithFormat: @"Connecting to %@…", [a imapHost]]];
+	[message setStringValue: needSignIn ? [NSString stringWithFormat: @"Starting the %@ sign-in…", [Mail2OAuth providerName: auth]]
+	                                    : [NSString stringWithFormat: @"Connecting to %@…", [a imapHost]]];
 	[self setBusy: YES];
+	if (cancelPipe[0] < 0 && pipe(cancelPipe) == 0) {
+		fcntl(cancelPipe[0], F_SETFL, O_NONBLOCK);
+		fcntl(cancelPipe[1], F_SETFL, O_NONBLOCK);
+	}
+	char junk[16];
+	while (cancelPipe[0] >= 0 && read(cancelPipe[0], junk, sizeof(junk)) > 0)	/* an earlier Cancel */
+		;
+	int cfd = cancelPipe[0];
 	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
 		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
 		Mail2IMAP *imap = [[Mail2IMAP alloc] initWithAccount: a];
 		NSString *err = nil;
-		BOOL ok = [imap connect: &err];
+		BOOL ok = YES;
+		if (needSignIn)
+			ok = [Mail2OAuth signIn: a prompt: ^(NSString *msg, NSString *url, NSString *code) {
+				[message setStringValue: msg];
+				/* Google's page, or Microsoft's code page, in the browser (Florence) */
+				if (url != nil)
+					[[NSWorkspace sharedWorkspace] openURL: [NSURL URLWithString: url]];
+			} cancelFd: cfd error: &err];
+		if (ok)
+			Mail2RunOnMain(^{ [message setStringValue: [NSString stringWithFormat: @"Connecting to %@…", [a imapHost]]]; });
+		ok = ok && [imap connect: &err];
 		[imap disconnect];
 		[imap release];
 		[err retain];
@@ -226,7 +375,7 @@ make_security(NSView *v, NSRect r)
 			[self setBusy: NO];
 			if (ok) {
 				ASSIGN(result, a);
-				[NSApp stopModal];
+				[self finish];
 			} else {
 				[message setTextColor: [NSColor colorWithCalibratedRed: 0.75 green: 0.1 blue: 0.1 alpha: 1]];
 				[message setStringValue: err ? err : @"Cannot sign in."];
@@ -238,34 +387,198 @@ make_security(NSView *v, NSRect r)
 	});
 }
 
-- (void) cancel: (id)sender
+/* the close button is Cancel */
+- (BOOL) windowShouldClose: (id)w
 {
-	if (testing)
-		return;
-	DESTROY(result);
-	[NSApp stopModal];
+	[self cancel: w];
+	return NO;
 }
 
-+ (Mail2Account *) runForAccount: (Mail2Account *)existing
+- (void) cancel: (id)sender
 {
-	Mail2AccountPanel *p = [[[Mail2AccountPanel alloc] init] autorelease];
+	if (testing) {	/* stops a sign-in waiting for the browser or the code */
+		if (cancelPipe[1] >= 0)
+			(void)write(cancelPipe[1], "c", 1);
+		return;
+	}
+	DESTROY(result);
+	[self finish];
+}
+
+static Mail2AccountPanel *open_panel;	/* one at a time; it keeps itself alive while open */
+
+/* the panel goes and the caller hears the result (nil: cancelled) */
+- (void) finish
+{
+	void (^done)(Mail2Account *) = [completion autorelease];
+	completion = nil;
+	[panel orderOut: nil];
+	if (done)
+		done(result);
+	if (open_panel == self) {
+		open_panel = nil;
+		[self autorelease];
+	}
+}
+
+/* Not modal: on this desktop a panel run with -runModalForWindow: was never painted (QEMU, 2026-11-08), while the
+ * same panel shown normally is. */
++ (void) showForAccount: (Mail2Account *)existing completion: (void (^)(Mail2Account *a))done
+{
+	if (open_panel != nil) {
+		[open_panel->panel makeKeyAndOrderFront: nil];
+		return;
+	}
+	Mail2AccountPanel *p = [[Mail2AccountPanel alloc] init];
+	open_panel = p;
+	p->completion = [done copy];
+	ASSIGN(p->existing, existing);
 	if (existing != nil) {
+		[p->authPopup selectItemAtIndex: [existing auth]];
+		p->authChosen = YES;
 		[p->nameField setStringValue: [existing fullName] ? [existing fullName] : @""];
 		[p->emailField setStringValue: [existing email]];
 		[p->passField setStringValue: [existing password] ? [existing password] : @""];
 		[p fillFrom: existing];
+		[p->sigView setString: [existing signature] ? [existing signature] : @""];
 		[p->emailField setEditable: NO];	/* the address names the account's files */
+		[p updateAuth];
 	} else {
 		[p->nameField setStringValue: NSFullUserName() ? NSFullUserName() : @""];
 		[p->imapSec selectItemAtIndex: 0];
 		[p->smtpSec selectItemAtIndex: 0];
 	}
-	[p->panel center];
+	[NSApp activateIgnoringOtherApps: YES];
 	[p->panel makeKeyAndOrderFront: nil];
+	redisplay_soon(p->panel);
 	[p->panel makeFirstResponder: existing ? (NSView *)p->passField : (NSView *)p->emailField];
-	[NSApp runModalForWindow: p->panel];
-	[p->panel orderOut: nil];
-	return [[p->result retain] autorelease];
+}
+
+@end
+
+/* ---- Mail2 > Accounts… ---- */
+
+@implementation Mail2AccountsWindow
+
+static NSButton *
+small_button(NSView *v, NSString *title, NSRect r, id target, SEL action)
+{
+	NSButton *b = [[[NSButton alloc] initWithFrame: r] autorelease];
+	[b setTitle: title];
+	[b setBezelStyle: NSRoundedBezelStyle];
+	[b setTarget: target];
+	[b setAction: action];
+	[v addSubview: b];
+	return b;
+}
+
+- (id) initWithOwner: (id)o
+{
+	if ((self = [super init]) == nil)
+		return nil;
+	owner = o;
+	panel = [[NSPanel alloc] initWithContentRect: centered(460, 300)	/* a panel: see the account panel */
+	    styleMask: NSTitledWindowMask | NSClosableWindowMask | NSResizableWindowMask backing: NSBackingStoreBuffered defer: NO];
+	[panel setHidesOnDeactivate: NO];
+	[panel setContentView: [[[Mail2PanelBackground alloc] initWithFrame: [[panel contentView] frame]] autorelease]];
+	[panel setTitle: @"Accounts"];
+	[panel setReleasedWhenClosed: NO];
+	[panel setMinSize: NSMakeSize(360, 200)];
+	NSView *v = [panel contentView];
+	NSScrollView *sv = [[[NSScrollView alloc] initWithFrame: NSMakeRect(16, 56, 428, 228)] autorelease];
+	[sv setHasVerticalScroller: YES];
+	[sv setBorderType: NSBezelBorder];
+	[sv setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
+	table = [[NSTableView alloc] initWithFrame: NSMakeRect(0, 0, 410, 228)];
+	NSTableColumn *c1 = [[[NSTableColumn alloc] initWithIdentifier: @"email"] autorelease];
+	[[c1 headerCell] setStringValue: @"Account"];
+	[c1 setWidth: 270];
+	[c1 setEditable: NO];
+	NSTableColumn *c2 = [[[NSTableColumn alloc] initWithIdentifier: @"auth"] autorelease];
+	[[c2 headerCell] setStringValue: @"Signs in with"];
+	[c2 setWidth: 130];
+	[c2 setEditable: NO];
+	[table addTableColumn: c1];
+	[table addTableColumn: c2];
+	[table setRowHeight: 22];
+	[table setDataSource: (id)self];
+	[table setDelegate: (id)self];
+	[table setTarget: self];
+	[table setDoubleAction: @selector(edit:)];
+	[sv setDocumentView: table];
+	[v addSubview: sv];
+	small_button(v, @"Add…", NSMakeRect(16, 14, 90, 28), self, @selector(add:));
+	editButton = [small_button(v, @"Edit…", NSMakeRect(112, 14, 90, 28), self, @selector(edit:)) retain];
+	removeButton = [small_button(v, @"Remove…", NSMakeRect(208, 14, 100, 28), self, @selector(remove:)) retain];
+	[self reload];
+	return self;
+}
+
+- (void) dealloc
+{
+	[panel release]; [table release]; [editButton release]; [removeButton release];
+	[super dealloc];
+}
+
+- (void) show
+{
+	[self reload];
+	[NSApp activateIgnoringOtherApps: YES];
+	[panel makeKeyAndOrderFront: nil];
+	redisplay_soon(panel);
+}
+
+- (void) reload
+{
+	[table reloadData];
+	if ([table selectedRow] < 0 && [[owner accounts] count] > 0)
+		[table selectRowIndexes: [NSIndexSet indexSetWithIndex: 0] byExtendingSelection: NO];
+	[self tableViewSelectionDidChange: nil];
+}
+
+- (NSInteger) numberOfRowsInTableView: (NSTableView *)t
+{
+	return (NSInteger)[[owner accounts] count];
+}
+
+- (id) tableView: (NSTableView *)t objectValueForTableColumn: (NSTableColumn *)c row: (NSInteger)r
+{
+	NSArray *a = [owner accounts];
+	if (r < 0 || r >= (NSInteger)[a count])
+		return nil;
+	Mail2Account *acc = [a objectAtIndex: r];
+	if ([[c identifier] isEqual: @"email"])
+		return [acc email];
+	if (![acc usesOAuth])
+		return @"Password";
+	return [NSString stringWithFormat: @"%@%@", [Mail2OAuth providerName: [acc auth]],
+	    [[acc refreshToken] length] ? @"" : @" (sign in again)"];
+}
+
+- (void) tableViewSelectionDidChange: (NSNotification *)n
+{
+	BOOL any = [table selectedRow] >= 0;
+	[editButton setEnabled: any];
+	[removeButton setEnabled: any];
+}
+
+- (void) add: (id)sender { [owner addAccount: sender]; [self reload]; }
+
+- (void) edit: (id)sender
+{
+	NSInteger r = [table selectedRow];
+	if (r >= 0)
+		[owner editAccountAtIndex: (NSUInteger)r];
+	[self reload];
+}
+
+- (void) remove: (id)sender
+{
+	NSInteger r = [table selectedRow];
+	if (r >= 0)
+		[owner removeAccountAtIndex: (NSUInteger)r];
+	[table deselectAll: nil];
+	[self reload];
 }
 
 @end

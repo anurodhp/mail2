@@ -117,7 +117,8 @@ bio_recv(void *ctx, unsigned char *buf, size_t len)
 	while ((n = read(t->fd, buf, len)) < 0 && errno == EINTR)
 		note_eintr();
 	if (n <= 0)
-		debug_failure(n == 0 ? "read (end of stream)" : "read", n == 0 ? 0 : errno);
+		if (n != 0)	/* the end of the stream is how a server says goodbye (HTTP's Connection: close): not news */
+			debug_failure("read", errno);
 	return n < 0 ? MBEDTLS_ERR_NET_RECV_FAILED : (int)n;
 }
 

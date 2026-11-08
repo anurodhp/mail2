@@ -37,5 +37,8 @@ NSString *Mail2MessageIDsIn(NSString *s);
 /* A subject without its Re:/Fwd:/AW:/[list] prefixes, lowercased: what replies in a conversation share. */
 NSString *Mail2BaseSubject(NSString *s);
 
+/* base64 (RFC 4648, with padding) */
+NSString *Mail2Base64(NSData *d);
+
 /* Whether -Mail2Debug YES or MAIL2_DEBUG=1 is set: logs the IMAP/SMTP conversation (passwords masked). */
 BOOL Mail2Debug(void);

@@ -2,11 +2,13 @@
 #import "Mail2IMAP.h"
 #import "Mail2Store.h"
 #import "Mail2Util.h"
+#import "Mail2OAuth.h"
 #include "Mail2TLS.h"
 #include <libetpan/libetpan-config.h>
 #include <libetpan/mailimap.h>
 #include <libetpan/idle.h>
 #include <libetpan/uidplus.h>
+#include <libetpan/mailimap_oauth2.h>
 #include <libetpan/mailimf.h>
 #include <errno.h>
 #include <poll.h>
@@ -228,7 +230,24 @@ uids_from_search(clist *res)
 			return NO;
 		}
 	}
-	r = mailimap_login(m, [[account imapUser] UTF8String], [[account password] UTF8String]);
+	if ([account usesOAuth]) {
+		/* XOAUTH2 with an access token; a refused one is renewed once */
+		int attempt;
+		r = MAILIMAP_ERROR_LOGIN;
+		for (attempt = 0; attempt < 2 && r != MAILIMAP_NO_ERROR; attempt++) {
+			NSString *tok = [Mail2OAuth accessTokenForAccount: account error: err];
+			if (tok == nil) {
+				mailimap_free(m);
+				return NO;
+			}
+			r = mailimap_oauth2_authenticate(m, [[account imapUser] UTF8String], [tok UTF8String]);
+			if (r != MAILIMAP_NO_ERROR)
+				[Mail2OAuth forgetAccessTokenForAccount: account];
+			if (r == MAILIMAP_ERROR_STREAM || r == MAILIMAP_ERROR_PARSE)
+				break;
+		}
+	} else
+		r = mailimap_login(m, [[account imapUser] UTF8String], [[account password] UTF8String]);
 	if (r != MAILIMAP_NO_ERROR) {
 		*err = r == MAILIMAP_ERROR_LOGIN && m->imap_response && *m->imap_response
 		    ? [NSString stringWithFormat: @"Login failed: %s", m->imap_response] : imap_error(m, r, @"Login");

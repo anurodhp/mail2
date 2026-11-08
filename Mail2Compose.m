@@ -119,6 +119,7 @@ quote(NSString *body)
 	[attachButton setRefusesFirstResponder: YES];
 	[cv addSubview: attachButton];
 	attachments = [[NSMutableArray alloc] init];
+	lastLengths = [[NSMutableDictionary alloc] init];
 
 	y = H - 48;
 	rule(cv, y, W);
@@ -147,6 +148,8 @@ quote(NSString *body)
 	while ((ss = [e nextObject]) != nil)
 		[fromPopup addItemWithTitle: [[ss account] fromAddress]];
 	[fromPopup selectItemAtIndex: [sessions indexOfObject: session]];
+	[fromPopup setTarget: self];
+	[fromPopup setAction: @selector(fromChanged:)];
 	[fromPopup setAutoresizingMask: NSViewMinYMargin];
 	[cv addSubview: fromPopup];
 	rule(cv, y, W);
@@ -205,6 +208,7 @@ quote(NSString *body)
 	[toField release]; [ccField release]; [bccField release]; [subjectField release];
 	[bodyView release]; [sendButton release]; [original release]; [inReplyTo release]; [references release];
 	[attachButton release]; [attachBar release]; [attachments release]; [bodyScroll release]; [draftId release];
+	[insertedSig release]; [lastLengths release];
 	[autosave release];
 	[super dealloc];
 }
@@ -228,10 +232,75 @@ quote(NSString *body)
 	[window setDocumentEdited: d];
 }
 
+/* ---- signatures ---- */
+
+/* "\n\n-- \nsignature" for the account, or "" */
+static NSString *
+signature_block(Mail2Session *s)
+{
+	NSString *sig = [[s account] signature];
+	return [sig length] ? [NSString stringWithFormat: @"\n\n-- \n%@", sig] : @"";
+}
+
+/* another From: its signature replaces the one in the body */
+- (void) fromChanged: (id)sender
+{
+	NSString *now = signature_block([self fromSession]);
+	NSString *body = [bodyView string];
+	NSRange r = [insertedSig length] ? [body rangeOfString: insertedSig] : NSMakeRange(NSNotFound, 0);
+	if (r.location != NSNotFound)
+		[bodyView replaceCharactersInRange: r withString: now];
+	else if ([now length] && [insertedSig length] == 0 && [[body stringByTrimmingCharactersInSet:
+	    [NSCharacterSet whitespaceAndNewlineCharacterSet]] length] == 0)
+		[bodyView setString: now];
+	ASSIGN(insertedSig, now);
+}
+
+/* ---- address completion ---- */
+
+/* As in Apple Mail: typing in To, Cc or Bcc completes the address being typed from the people in the index, the
+ * completed part selected so that typing on replaces it and Tab, Return or a comma keeps it. Only when the caret is
+ * at the end and the text grew (deleting never completes). */
+- (void) completeAddressIn: (NSTextField *)f editor: (NSText *)ed
+{
+	NSString *text = [ed string];
+	NSUInteger len = [text length];
+	NSRange sel = [ed selectedRange];
+	NSUInteger last = [[lastLengths objectForKey: [NSValue valueWithNonretainedObject: f]] unsignedIntegerValue];
+	[lastLengths setObject: [NSNumber numberWithUnsignedInteger: len] forKey: [NSValue valueWithNonretainedObject: f]];
+	if (len <= last || sel.location != len || sel.length != 0)
+		return;
+	NSRange comma = [text rangeOfString: @"," options: NSBackwardsSearch];
+	NSUInteger start = comma.location == NSNotFound ? 0 : comma.location + 1;
+	while (start < len && [text characterAtIndex: start] == ' ')
+		start++;
+	NSString *frag = [text substringFromIndex: start];
+	if ([frag length] < 2 || [frag rangeOfString: @"<"].location != NSNotFound)
+		return;
+	NSEnumerator *e = [[[Mail2Store sharedStore] addressesMatching: frag limit: 8] objectEnumerator];
+	NSString *m;
+	while ((m = [e nextObject]) != nil) {
+		if ([[m lowercaseString] hasPrefix: [frag lowercaseString]] && [m length] > [frag length]) {
+			/* the typed part keeps its case; the rest is the completion, selected */
+			[ed replaceCharactersInRange: NSMakeRange(len, 0) withString: [m substringFromIndex: [frag length]]];
+			[ed setSelectedRange: NSMakeRange(len, [m length] - [frag length])];
+			return;
+		}
+	}
+}
+
 - (void) controlTextDidChange: (NSNotification *)n
 {
-	if ([n object] == subjectField)
+	id o = [n object];
+	if (o == subjectField)
 		[window setTitle: [self plainTitle]];
+	else if (o == toField || o == ccField || o == bccField) {
+		NSText *ed = [[n userInfo] objectForKey: @"NSFieldEditor"];
+		if (ed == nil)
+			ed = [window fieldEditor: NO forObject: o];
+		if (ed != nil)
+			[self completeAddressIn: o editor: ed];
+	}
 	[self setDirty: YES];
 }
 
@@ -452,6 +521,9 @@ quote(NSString *body)
 	Mail2Compose *c = [[[Mail2Compose alloc] initWithSessions: all session: nil] autorelease];
 	if (to)
 		[c->toField setStringValue: to];
+	ASSIGN(c->insertedSig, signature_block([c fromSession]));
+	[c->bodyView setString: c->insertedSig];
+	[c->bodyView setSelectedRange: NSMakeRange(0, 0)];
 	[c showFocusing: to ? (NSView *)c->subjectField : (NSView *)c->toField];
 	return c;
 }
@@ -508,7 +580,8 @@ own_address_filter(NSArray *addrs, NSString *mine, NSMutableSet *seen)
 	[c setOriginal: m parsed: p];
 	NSString *body = [NSString stringWithFormat: @"\n\nOn %@, %@ wrote:\n\n%@\n", Mail2LongDate([m date]), [m sender],
 	    quote([[p body] stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceAndNewlineCharacterSet]])];
-	[c->bodyView setString: body];
+	ASSIGN(c->insertedSig, signature_block(s));
+	[c->bodyView setString: [c->insertedSig stringByAppendingString: body]];
 	[c->bodyView setSelectedRange: NSMakeRange(0, 0)];
 	[c showFocusing: c->bodyView];
 	return c;
@@ -520,7 +593,8 @@ own_address_filter(NSArray *addrs, NSString *mine, NSMutableSet *seen)
 	[c->subjectField setStringValue: strip_prefix([m subject], @"Fwd:")];
 	[c->window setTitle: [c->subjectField stringValue]];
 	NSString *from = [[m fromName] length] ? [NSString stringWithFormat: @"%@ <%@>", [m fromName], [m fromAddr]] : [m fromAddr];
-	NSMutableString *body = [NSMutableString stringWithString: @"\n\nBegin forwarded message:\n\n"];
+	ASSIGN(c->insertedSig, signature_block(s));
+	NSMutableString *body = [NSMutableString stringWithFormat: @"%@\n\nBegin forwarded message:\n\n", c->insertedSig];
 	[body appendFormat: @"From: %@\n", from ? from : @""];
 	[body appendFormat: @"Subject: %@\n", [m subject] ? [m subject] : @""];
 	[body appendFormat: @"Date: %@\n", Mail2LongDate([m date])];
